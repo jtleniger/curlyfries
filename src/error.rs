@@ -58,8 +58,8 @@ pub enum Error {
         /// Underlying failure.
         source: io::Error,
     },
-    /// No `curlyfries.json` was found walking up from the start directory.
-    #[error("error: no curlyfries.json found in {start} or any parent directory\n  hint: run inside a project, or pass -C <dir>", start = start.display())]
+    /// No `curlyfries.json` was found in the start directory.
+    #[error("error: no curlyfries.json found in {start}\n  hint: run inside a project, or pass -C <dir>", start = start.display())]
     ProjectNotFound {
         /// Directory discovery started from.
         start: PathBuf,

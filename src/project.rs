@@ -1,6 +1,7 @@
 //! Project discovery, request enumeration and environment resolution.
 //!
-//! A project root is the nearest ancestor directory holding `curlyfries.json`.
+//! A project root is the current directory (or `-C <dir>`) when it holds
+//! `curlyfries.json`; no parent directories are searched.
 //! Request ids are the file path relative to `requestsDir` without the `.json`
 //! suffix; environment names are env file stems matching
 //! `[A-Za-z0-9][A-Za-z0-9_-]*`.
@@ -83,7 +84,9 @@ pub struct Entry {
     pub file: PathBuf,
 }
 
-/// Finds the project root from `start`, or uses `override_dir` verbatim.
+/// Finds the project root in `start` only, or uses `override_dir` verbatim.
+///
+/// Parent directories are never searched.
 pub fn discover(start: &Path, override_dir: Option<&Path>) -> Result<Project, Error> {
     if let Some(dir) = override_dir {
         let root = dir.to_path_buf();
@@ -98,17 +101,13 @@ pub fn discover(start: &Path, override_dir: Option<&Path>) -> Result<Project, Er
         path: Some(start.to_path_buf()),
         source,
     })?;
-    let mut current: Option<&Path> = Some(&start);
-    while let Some(dir) = current {
-        let manifest_path = dir.join(MANIFEST_FILE);
-        if manifest_path.is_file() {
-            let manifest = load_manifest(&manifest_path)?;
-            return Ok(Project {
-                root: dir.to_path_buf(),
-                manifest,
-            });
-        }
-        current = dir.parent();
+    let manifest_path = start.join(MANIFEST_FILE);
+    if manifest_path.is_file() {
+        let manifest = load_manifest(&manifest_path)?;
+        return Ok(Project {
+            root: start,
+            manifest,
+        });
     }
     Err(Error::ProjectNotFound { start })
 }
@@ -388,13 +387,17 @@ mod tests {
     }
 
     #[test]
-    fn discovery_walks_up_to_the_manifest() {
+    fn discovery_does_not_walk_up_to_the_manifest() {
         let dir = project_with(&[
             (MANIFEST_FILE, "{}"),
             ("requests/pets/inventory.json", "{}"),
         ]);
         let deep = dir.mkdir("requests/pets");
-        let project = discover(&deep, None).unwrap();
+        let err = discover(&deep, None).unwrap_err();
+        assert!(matches!(err, Error::ProjectNotFound { .. }), "{err}");
+        assert_eq!(err.exit_code(), 1);
+
+        let project = discover(dir.path(), None).unwrap();
         assert_eq!(project.root, dir.path().canonicalize().unwrap());
         assert_eq!(project.manifest, Manifest::default());
         assert!(project.requests_dir().ends_with("requests"));
@@ -416,7 +419,6 @@ mod tests {
         let err = discover(dir.path(), None).unwrap_err();
         let text = err.to_string();
         assert!(text.contains("no curlyfries.json found in"), "{text}");
-        assert!(text.contains("or any parent directory"), "{text}");
         assert!(text.contains("-C <dir>"), "{text}");
         assert_eq!(err.exit_code(), 1);
     }

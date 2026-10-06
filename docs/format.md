@@ -4,8 +4,8 @@ Everything curlyfries knows lives in files you can read, diff and review.
 
 ## Project root and manifest
 
-The project root is the nearest ancestor directory (starting from the current
-directory, or from `-C <dir>`) that contains `curlyfries.json`. The manifest is
+The project root is the current directory (or `-C <dir>`) when it contains
+`curlyfries.json`; parent directories are never searched. The manifest is
 optional in spirit — an empty `{}` marks the root — but every key it may hold is
 listed here:
 

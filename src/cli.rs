@@ -25,7 +25,7 @@ use crate::{Map, execute, template};
     disable_help_subcommand = true
 )]
 pub struct Cli {
-    /// Project root (overrides upward discovery).
+    /// Project root (overrides the current directory).
     #[arg(short = 'C', long = "project", global = true, value_name = "DIR")]
     pub project: Option<PathBuf>,
 

@@ -25,7 +25,7 @@ cargo install --path .        # ~/.cargo/bin/curlyfries
 ## Layout
 
 ```
-<project root>/                  # nearest ancestor directory with curlyfries.json
+<project root>/                  # directory with curlyfries.json
   curlyfries.json                # manifest (marks the project root)
   requests/**/*.json             # one file per request, any nesting depth
   environments/<name>.json       # optional named environments
@@ -143,7 +143,7 @@ curlyfries session clear [--all]
 
 | flag | meaning |
 |---|---|
-| `-C, --project <dir>` | project root, overriding upward discovery |
+| `-C, --project <dir>` | project root; defaults to the current directory |
 | `-e, --env <name>` | environment file to load (default: the manifest's `defaultEnvironment`, else the only environment file) |
 | `--var NAME=VALUE` | override a variable; `VALUE` is parsed as JSON when possible, otherwise taken as a string |
 | `--no-session` | ignore `.curlyfries/session.json` completely (never read, never written) |
@@ -213,7 +213,7 @@ error: no base URL for request `ships/list`
 ```
 
 ```
-error: no curlyfries.json found in /tmp or any parent directory
+error: no curlyfries.json found in /tmp
   hint: run inside a project, or pass -C <dir>
 ```
 

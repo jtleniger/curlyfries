@@ -1,6 +1,7 @@
 //! curlyfries — a filesystem-driven CLI API client.
 //!
-//! The project root is the nearest ancestor directory holding `curlyfries.json`.
+//! The project root is the current directory (or `-C <dir>`) when it holds
+//! `curlyfries.json`; parent directories are never searched.
 //! Request definitions live under `requests/**/*.json`, environments under
 //! `environments/<name>.json` and captured variables persist in
 //! `.curlyfries/session.json`.
