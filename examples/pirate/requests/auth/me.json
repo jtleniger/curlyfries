@@ -1,0 +1,8 @@
+{
+  "name": "Who am I?",
+  "method": "GET",
+  "path": "/auth/me",
+  "headers": {
+    "Authorization": "Bearer ${token}"
+  }
+}

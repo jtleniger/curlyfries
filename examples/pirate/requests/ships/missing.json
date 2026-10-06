@@ -1,0 +1,5 @@
+{
+  "name": "A ship that does not exist",
+  "method": "GET",
+  "path": "/ships/9999"
+}

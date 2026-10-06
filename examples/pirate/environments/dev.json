@@ -1,0 +1,14 @@
+{
+  "baseUrl": "http://127.0.0.1:4000",
+  "limit": 2,
+  "pirate": { "username": "silver", "password": "piecesof8" },
+  "admiral": { "username": "flint", "password": "blackbeard" },
+  "ship": {
+    "name": "Curlyfries",
+    "class": "frigate",
+    "crewCapacity": 42,
+    "homePort": "Tortuga",
+    "status": "docked",
+    "launchedYear": 1701
+  }
+}

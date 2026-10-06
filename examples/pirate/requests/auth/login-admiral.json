@@ -1,0 +1,9 @@
+{
+  "name": "Log in as the admiral",
+  "method": "POST",
+  "path": "/auth/login",
+  "body": "${admiral}",
+  "outputs": [
+    { "admiralToken": "response.body.access_token" }
+  ]
+}

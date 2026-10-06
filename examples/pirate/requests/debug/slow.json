@@ -1,0 +1,5 @@
+{
+  "name": "Slow endpoint (for --timeout)",
+  "method": "GET",
+  "path": "/_debug/slow?ms=3000"
+}

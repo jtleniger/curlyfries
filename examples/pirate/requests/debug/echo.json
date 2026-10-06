@@ -1,0 +1,14 @@
+{
+  "name": "Echo what the server received",
+  "method": "POST",
+  "path": "/_debug/echo",
+  "body": {
+    "name": "${shipName}",
+    "limit": "${limit}",
+    "typed": 42
+  },
+  "outputs": [
+    { "echoMethod": "response.body.method" },
+    { "echoBody": "response.body.body" }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "Delete the ship we just created",
+  "method": "DELETE",
+  "path": "/ships/${shipId}",
+  "headers": {
+    "Authorization": "Bearer ${admiralToken}"
+  }
+}

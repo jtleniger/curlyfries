@@ -1,0 +1,13 @@
+{
+  "name": "Create a ship",
+  "method": "POST",
+  "path": "/ships",
+  "headers": {
+    "Authorization": "Bearer ${token}"
+  },
+  "body": "${ship}",
+  "outputs": [
+    { "shipId": "response.body.id" },
+    { "shipName": "response.body.name" }
+  ]
+}

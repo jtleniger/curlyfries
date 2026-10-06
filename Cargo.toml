@@ -1,0 +1,15 @@
+[package]
+name = "curlyfries"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Filesystem-driven CLI API client: requests as JSON files, environments as JSON, captures persisted in a session file"
+repository = "https://github.com/jtleniger/curlyfries"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+ureq = "3"
