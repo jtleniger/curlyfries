@@ -5,7 +5,14 @@
   "headers": {
     "Authorization": "Bearer ${token}"
   },
-  "body": "${ship}",
+  "body": {
+    "name": "Curlyfries ${random.string.8}",
+    "class": "frigate",
+    "crewCapacity": "${random.int.1.500}",
+    "homePort": "Tortuga",
+    "status": "docked",
+    "launchedYear": "${random.int.1400.2100}"
+  },
   "outputs": [
     { "shipId": "response.body.id" },
     { "shipName": "response.body.name" }

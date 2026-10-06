@@ -11,10 +11,15 @@
 //! numbers and booleans as JSON literals, arrays and objects as compact JSON and
 //! `null` as an error, so a null can never silently become an empty URL segment,
 //! header or key.
+//!
+//! Names starting with `random.` are built-in generators rather than variables
+//! (see [`crate::random`]). They are consulted only when every scope misses, so
+//! `--var`, the session store and the environment can shadow them.
 
 use serde_json::Value;
 
 use crate::error::TemplateProblem;
+use crate::random::{self, RandomError};
 
 /// Lookup used to resolve variable names while rendering.
 pub type Lookup<'a> = &'a dyn Fn(&str) -> Option<Value>;
@@ -47,6 +52,9 @@ pub enum RenderError {
     /// A templated object key or header name rendered to the empty string.
     #[error("`{0}` templated to an empty string")]
     EmptyKey(String),
+    /// A `random.` built-in name could not be generated.
+    #[error(transparent)]
+    Random(#[from] RandomError),
     /// The template did not parse; loading validates this up front.
     #[error("{0}")]
     Syntax(TemplateProblem),
@@ -154,7 +162,7 @@ impl Template {
             let Segment::Var(name) = &self.segments[0] else {
                 unreachable!("whole templates hold exactly one variable")
             };
-            return lookup(name).ok_or_else(|| RenderError::MissingVar(name.clone()));
+            return resolve(name, lookup);
         }
         Ok(Value::String(self.render_string(lookup)?))
     }
@@ -165,13 +173,24 @@ impl Template {
         for segment in &self.segments {
             match segment {
                 Segment::Literal(text) => out.push_str(text),
-                Segment::Var(name) => match lookup(name) {
-                    Some(value) => out.push_str(&string_form(name, &value)?),
-                    None => return Err(RenderError::MissingVar(name.clone())),
-                },
+                Segment::Var(name) => {
+                    let value = resolve(name, lookup)?;
+                    out.push_str(&string_form(name, &value)?);
+                }
             }
         }
         Ok(out)
+    }
+}
+
+/// Resolves one variable name: the scopes first, then the `random.` built-ins.
+fn resolve(name: &str, lookup: Lookup<'_>) -> Result<Value, RenderError> {
+    if let Some(value) = lookup(name) {
+        return Ok(value);
+    }
+    match random::generate(name) {
+        Some(result) => result.map_err(RenderError::from),
+        None => Err(RenderError::MissingVar(name.to_string())),
     }
 }
 
@@ -293,6 +312,49 @@ mod tests {
         assert!(matches!(
             t.render_string(&vars(&[("x", Value::Null)])),
             Err(RenderError::NullInStringSlot(name)) if name == "x"
+        ));
+    }
+
+    #[test]
+    fn random_builtins_keep_their_type_and_yield_to_scopes() {
+        assert!(matches!(
+            render("${random.bool}", &vars(&[])),
+            Ok(Value::Bool(_))
+        ));
+        assert_eq!(render("${random.int.1.1}", &vars(&[])).unwrap(), json!(1));
+        let text = render("${random.string.7}", &vars(&[])).unwrap();
+        assert_eq!(text.as_str().map(str::len), Some(7));
+        assert_eq!(
+            parse("x-${random.string.5}")
+                .unwrap()
+                .render_string(&vars(&[]))
+                .unwrap()
+                .len(),
+            7
+        );
+        // A scope value shadows the built-in, so `--var` keeps runs reproducible.
+        assert_eq!(
+            render("${random.int.6}", &vars(&[("random.int.6", json!(4))])).unwrap(),
+            json!(4)
+        );
+        assert_eq!(
+            parse("${random.bool}")
+                .unwrap()
+                .render_string(&vars(&[("random.bool", json!("fixed"))]))
+                .unwrap(),
+            "fixed"
+        );
+    }
+
+    #[test]
+    fn bad_random_names_are_render_errors() {
+        assert!(matches!(
+            render("${random.nope}", &vars(&[])),
+            Err(RenderError::Random(RandomError::Unknown(name))) if name == "random.nope"
+        ));
+        assert!(matches!(
+            render("${random.int.9.2}", &vars(&[])),
+            Err(RenderError::Random(RandomError::Argument { .. }))
         ));
     }
 

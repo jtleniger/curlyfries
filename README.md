@@ -8,7 +8,9 @@ reuse them without logging in again.
 - **Requests as files** — `requests/ships/create.json` is the request `ships/create`.
   They live in git, review like code and nest as deep as you like.
 - **Templates, not scripting** — `${token}` anywhere in a path, header or body
-  picks the value up from `--var`, the session store or the environment.
+  picks the value up from `--var`, the session store or the environment, and
+  `${random.string.8}` / `${random.int.1.500}` / `${random.bool}` mint fresh
+  random values when nothing defines them.
 - **Captures** — `outputs` pull values out of a response body, a header or the
   status line and keep them for later requests (in this run or a later one).
 - **Loud failures** — an undefined variable, a missing output path or a broken
@@ -66,7 +68,8 @@ curlyfries -C examples/pirate run auth/login auth/login-admiral ships/create shi
 ```
 
 Each `--json` line is one request result; `ships/create` reports
-`"status":201` with `"captured":{"shipId":6,"shipName":"Curlyfries"}` and
+`"status":201` with `"captured":{"shipId":6,"shipName":"Curlyfries 4fQ2m8Za"}`
+(the name carries a random suffix, so create can be run again) and
 `ships/delete` — which uses `${shipId}` from that capture and `${admiralToken}`
 from `auth/login-admiral` — reports `"status":204`.
 
@@ -82,24 +85,30 @@ curlyfries --no-session run auth/me   # exit 3: undefined variable `token`
 ## Terminal UI
 
 Running `curlyfries` with no subcommand opens a full-screen TUI: the request
-tree on the left, the resolved (or raw) request above the response, the active
-scope's captures below, and a key legend at the bottom.
+tree on the left, the resolved (or definition) request above the response, the
+active scope's captures below, and a key legend at the bottom. The resolved
+request labels each part — `url`, `headers` and `body`. Whenever a response
+arrives its status line is shown, even if an `outputs` expression then fails;
+that failure appears in its own wrapped **Output error** section below the tabs.
 
 ```
-╭Requests─────────────╮╭Request — resolved ─────────────────╮
-│auth/                ││POST http://127.0.0.1:4000/auth/login│
-│  POST auth/login — …││Content-Type: application/json      │
-│ships/               ││{ "username": "silver", … }         │
-│  GET ships/list — … │╰────────────────────────────────────╯
-│                     │╭Response — http://…/auth/login──────╮
-│                     ││← 200 OK  1ms                       │
-│                     ││ 1 Body │ 2 Headers │ 3 Raw         │
-│                     ││{ "access_token": "…" }             │
-╰─────────────────────╯╰────────────────────────────────────╯
+╭Requests──────────────────────────────╮╭Request — resolved ───────────────────╮
+│auth/                                 ││url                                   │
+│  POST auth/login — …                 ││POST http://127.0.0.1:4000/auth/login │
+│ships/                                ││headers                               │
+│  GET ships/list — …                  ││Content-Type: application/json        │
+│                                      ││body                                  │
+│                                      ││{ "username": "silver", … }           │
+│                                      │╰──────────────────────────────────────╯
+│                                      │╭Response — http://…/auth/login────────╮
+│                                      ││← 200 OK  1ms                         │
+│                                      ││ 1 Body │ 2 Headers │ 3 Raw           │
+│                                      ││{ "access_token": "…" }               │
+╰──────────────────────────────────────╯╰──────────────────────────────────────╯
 ╭Captures — dev─────────────────────────────────────────────╮
 │token = "eyJhbGciOiJIUzI1NiIs…"                            │
 ╰───────────────────────────────────────────────────────────╯
-↑↓ select · Enter run · e env · Tab body/headers/raw · v raw/resolved · / filter · ? help · q quit
+↑↓ select · Enter run · e env · Tab body/headers/raw · v definition/resolved · / filter · ? help · q quit
 ```
 
 | key | effect |
@@ -111,7 +120,7 @@ scope's captures below, and a key legend at the bottom.
 | `/` | filter the tree; `Esc` clears, `Enter` keeps the filter |
 | `Tab`, `Shift-Tab` | next / previous response tab |
 | `1`, `2`, `3` | Body / Headers / Raw |
-| `v` | resolved / raw request view |
+| `v` | resolved / definition request view |
 | `J`, `K`, `PageUp`/`PageDown`, `Home`/`End` | scroll the response |
 | `?` | help overlay (any key closes it) |
 | `q`, `Esc`, `Ctrl-C` | quit |
@@ -174,7 +183,7 @@ characters are truncated with `…`.
 error: undefined variable `token` in requests/auth/me.json
   at:    /headers/Authorization
   value: "Bearer ${token}"
-  known: environment `dev` → admiral, baseUrl, limit, pirate, ship
+  known: environment `dev` → admiral, baseUrl, limit, pirate
          session           → (none)
 ```
 

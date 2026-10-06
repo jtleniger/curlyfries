@@ -204,6 +204,11 @@ fn render_failure(
             pointer: pointer.to_string(),
             message: format!("`{key}` templated to an empty string"),
         },
+        RenderError::Random(error) => Error::Schema {
+            path: def.file.clone(),
+            pointer: pointer.to_string(),
+            message: error.to_string(),
+        },
         RenderError::Syntax(problem) => request::template_error(&def.file, pointer, problem, raw),
     }
 }

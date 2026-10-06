@@ -42,7 +42,7 @@ pub enum RequestView {
     /// The request with every template resolved.
     Resolved,
     /// The request file as written.
-    Raw,
+    Definition,
 }
 
 /// Which tab the response pane shows.
@@ -92,7 +92,7 @@ pub struct App {
     pub(crate) project: Project,
     pub(crate) entries: Vec<Entry>,
     defs: Vec<RequestDef>,
-    raw_files: Vec<String>,
+    definition_files: Vec<String>,
     pub(crate) labels: Vec<String>,
     pub(crate) rows: Vec<TreeRow>,
     pub(crate) filter: String,
@@ -106,7 +106,7 @@ pub struct App {
     session: Session,
     pub(crate) request_view: RequestView,
     resolved_view: Vec<Line<'static>>,
-    raw_view: Vec<Line<'static>>,
+    definition_view: Vec<Line<'static>>,
     pub(crate) response_tab: ResponseTab,
     response_lines: Vec<Line<'static>>,
     pub(crate) response_scroll: u16,
@@ -132,14 +132,14 @@ impl App {
         let session = Session::load(&project.root, !config.no_session)?;
 
         let mut defs = Vec::with_capacity(entries.len());
-        let mut raw_files = Vec::with_capacity(entries.len());
+        let mut definition_files = Vec::with_capacity(entries.len());
         for entry in &entries {
             defs.push(request::load_request(&entry.id, &entry.file)?);
             let text = fs::read_to_string(&entry.file).map_err(|source| Error::Io {
                 path: Some(entry.file.clone()),
                 source,
             })?;
-            raw_files.push(text);
+            definition_files.push(text);
         }
         let labels: Vec<String> = defs.iter().map(render::request_label).collect();
         let rows = tree::build(&entries, &labels);
@@ -156,7 +156,7 @@ impl App {
             project,
             entries,
             defs,
-            raw_files,
+            definition_files,
             labels,
             rows,
             filter: String::new(),
@@ -170,7 +170,7 @@ impl App {
             session,
             request_view: RequestView::Resolved,
             resolved_view: Vec::new(),
-            raw_view: Vec::new(),
+            definition_view: Vec::new(),
             response_tab: ResponseTab::Body,
             response_lines: Vec::new(),
             response_scroll: 0,
@@ -247,7 +247,7 @@ impl App {
                         self.last = Some(LastRun {
                             status: Some((render::status_class(outcome.response.status), status)),
                             url: outcome.request.url.clone(),
-                            error: None,
+                            error: outcome.capture_error.map(|error| error.to_string()),
                             response: Some(outcome.response),
                         });
                     }
@@ -309,7 +309,7 @@ impl App {
     pub(crate) fn request_lines(&self) -> &[Line<'static>] {
         match self.request_view {
             RequestView::Resolved => &self.resolved_view,
-            RequestView::Raw => &self.raw_view,
+            RequestView::Definition => &self.definition_view,
         }
     }
 
@@ -432,8 +432,8 @@ impl App {
             KeyCode::Char('3') => self.set_response_tab(ResponseTab::Raw),
             KeyCode::Char('v') => {
                 self.request_view = match self.request_view {
-                    RequestView::Resolved => RequestView::Raw,
-                    RequestView::Raw => RequestView::Resolved,
+                    RequestView::Resolved => RequestView::Definition,
+                    RequestView::Definition => RequestView::Resolved,
                 };
                 self.refresh_request_views();
             }
@@ -581,7 +581,7 @@ impl App {
     fn refresh_request_views(&mut self) {
         let Some(index) = self.selected_entry() else {
             self.resolved_view = Vec::new();
-            self.raw_view = Vec::new();
+            self.definition_view = Vec::new();
             return;
         };
         let theme = self.theme;
@@ -601,20 +601,16 @@ impl App {
             }
         };
         self.resolved_view = resolved;
-        self.raw_view = json::json_lines(&self.raw_files[index], &theme);
+        self.definition_view = json::json_lines(&self.definition_files[index], &theme);
     }
 
     fn refresh_response_view(&mut self) {
         let theme = self.theme;
-        let lines = match (&self.last, self.response_tab) {
-            (None, _) => Vec::new(),
-            (Some(last), _) if last.error.is_some() => vec![Line::styled(
-                last.error.clone().unwrap_or_default(),
-                Style::default().fg(theme.method_delete),
-            )],
-            (Some(last), tab) => match &last.response {
+        let lines = match &self.last {
+            None => Vec::new(),
+            Some(last) => match &last.response {
                 None => Vec::new(),
-                Some(response) => match tab {
+                Some(response) => match self.response_tab {
                     ResponseTab::Body => {
                         if response.body_text.is_empty() {
                             vec![Line::styled("(empty body)", Style::default().fg(theme.dim))]
@@ -704,27 +700,41 @@ fn plain_lines(text: &str) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// Renders a resolved request for the request pane.
+/// Renders a resolved request for the request pane, labelling each part.
 fn resolved_lines(request: &ResolvedRequest, theme: &Theme) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            format!("{} ", request.method),
-            Style::default()
-                .fg(theme.method(&request.method))
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(request.url.clone()),
-    ])];
-    if !request.headers.is_empty() {
-        lines.push(Line::raw(String::new()));
+    let section = |title: &str| Line::styled(title.to_string(), Style::default().fg(theme.title));
+    let empty = || Line::styled("(none)", Style::default().fg(theme.dim));
+
+    let mut lines = vec![
+        section("url"),
+        Line::from(vec![
+            Span::styled(
+                format!("{} ", request.method),
+                Style::default()
+                    .fg(theme.method(&request.method))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(request.url.clone()),
+        ]),
+    ];
+
+    lines.push(Line::raw(String::new()));
+    lines.push(section("headers"));
+    if request.headers.is_empty() {
+        lines.push(empty());
+    } else {
         for (name, value) in &request.headers {
             lines.push(Line::from(format!("{name}: {value}")));
         }
     }
-    if let Some(body) = &request.body {
-        lines.push(Line::raw(String::new()));
-        lines.extend(json::json_lines(body, theme));
+
+    lines.push(Line::raw(String::new()));
+    lines.push(section("body"));
+    match &request.body {
+        Some(body) => lines.extend(json::json_lines(body, theme)),
+        None => lines.push(empty()),
     }
+
     lines
 }
 
@@ -821,5 +831,49 @@ mod tests {
         assert_eq!(app.response_tab, ResponseTab::Raw);
         app.on_key(key(KeyCode::Char('1')));
         assert_eq!(app.response_tab, ResponseTab::Body);
+    }
+
+    #[test]
+    fn resolved_lines_label_each_part() {
+        let theme = Theme::plain();
+        let request = ResolvedRequest {
+            id: "ships/list".to_string(),
+            def_file: std::path::PathBuf::from("requests/ships/list.json"),
+            name: "list ships".to_string(),
+            method: "POST".to_string(),
+            url: "http://127.0.0.1:4000/ships".to_string(),
+            headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+            body: Some(r#"{"name":"x"}"#.to_string()),
+        };
+        let text: Vec<String> = resolved_lines(&request, &theme)
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        assert_eq!(text[0], "url");
+        assert!(
+            text[1].contains("POST http://127.0.0.1:4000/ships"),
+            "{text:?}"
+        );
+        assert!(text.contains(&"headers".to_string()), "{text:?}");
+        assert!(
+            text.contains(&"Content-Type: application/json".to_string()),
+            "{text:?}"
+        );
+        assert!(text.contains(&"body".to_string()), "{text:?}");
+
+        let bodyless = ResolvedRequest {
+            headers: Vec::new(),
+            body: None,
+            ..request
+        };
+        let text: Vec<String> = resolved_lines(&bodyless, &theme)
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        assert_eq!(
+            text.iter().filter(|line| *line == "(none)").count(),
+            2,
+            "{text:?}"
+        );
     }
 }

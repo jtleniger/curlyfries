@@ -5,7 +5,8 @@
   "body": {
     "name": "${shipName}",
     "limit": "${limit}",
-    "typed": 42
+    "typed": 42,
+    "flag": "${random.bool}"
   },
   "outputs": [
     { "echoMethod": "response.body.method" },

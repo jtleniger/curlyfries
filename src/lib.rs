@@ -21,6 +21,7 @@ pub mod error;
 pub mod execute;
 pub mod expression;
 pub mod project;
+pub mod random;
 pub mod render;
 pub mod request;
 pub mod runner;

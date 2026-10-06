@@ -41,6 +41,8 @@ pub struct RunOutcome {
     pub response: ExecResult,
     /// Variables captured from this response.
     pub captured: Map,
+    /// Why `outputs` evaluation failed, if it did. When set, `captured` is empty.
+    pub capture_error: Option<Error>,
 }
 
 impl Runner<'_> {
@@ -64,7 +66,10 @@ impl Runner<'_> {
         };
 
         let response = execute::execute(&self.client, &resolved, self.timeout)?;
-        let captured = execute::capture(&def.outputs, &response, &def.file)?;
+        let (captured, capture_error) = match execute::capture(&def.outputs, &response, &def.file) {
+            Ok(captured) => (captured, None),
+            Err(error) => (Map::new(), Some(error)),
+        };
 
         if !captured.is_empty() {
             self.session.set(&scope, captured.clone());
@@ -84,6 +89,7 @@ impl Runner<'_> {
             request: resolved,
             response,
             captured,
+            capture_error,
         })
     }
 }

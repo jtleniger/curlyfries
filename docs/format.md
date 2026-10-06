@@ -33,7 +33,11 @@ Ids are listed in sorted order, and `run` accepts an id with or without its
   "method": "POST",
   "path": "/ships",
   "headers": { "Authorization": "Bearer ${token}", "X-Trace": "curlyfries" },
-  "body": "${ship}",
+  "body": {
+    "name": "Curlyfries ${random.string.8}",
+    "class": "frigate",
+    "crewCapacity": "${random.int.1.500}"
+  },
   "outputs": [
     { "shipId": "response.body.id" },
     { "shipName": "response.body.name" }
@@ -61,7 +65,9 @@ error: invalid request file requests/ships/create.json
 ## Templating
 
 Delimiter: `${name}`. Variable names match `[A-Za-z_][A-Za-z0-9_.-]*`
-(`${shipName}`, `${access_token}`, `${order.total}`). Scanning is left to right:
+(`${shipName}`, `${access_token}`, `${order.total}`); names starting with
+`random.` are built-ins rather than variables (see
+[Random values](#random-values)). Scanning is left to right:
 
 | input | result |
 |---|---|
@@ -95,7 +101,7 @@ error: unterminated `${` in requests/ships/create.json
 
 If a string's trimmed form is exactly one placeholder and nothing else, the
 placeholder **is** the value, with its JSON type intact, and the surrounding
-whitespace is dropped. `"body": "${ship}"` sends the `ship` object, and
+whitespace is dropped. `"body": "${pirate}"` sends the `pirate` object, and
 `"limit": "${limit}"` with `limit = 2` sends the number `2` — the `/_debug/echo`
 example request in `examples/pirate` relies on exactly this.
 
@@ -114,9 +120,40 @@ Any other string is interpolated: `"Bearer ${token}"` and
 `"/ships/${shipId}"` concatenate literal text with string forms. An object key
 or header name that renders to `""` is an error.
 
+### Random values
+
+A placeholder whose name starts with `random.` is a built-in, not a variable.
+The built-ins are consulted only when `--var`, the session store and the
+environment all miss, so any of those can shadow one to pin a value:
+
+| placeholder | value |
+|---|---|
+| `${random.string}` | 16 random ASCII letters or digits |
+| `${random.string.<n>}` | `n` random letters or digits, `1 <= n <= 1024` |
+| `${random.int}` | a random integer in `0..=4294967295` |
+| `${random.int.<max>}` | a random integer in `0..=max` |
+| `${random.int.<min>.<max>}` | a random integer in `min..=max` |
+| `${random.bool}` | `true` or `false` |
+
+A whole placeholder keeps its JSON type, so `"crewCapacity": "${random.int.1.500}"`
+sends a number and `"flag": "${random.bool}"` a boolean; inside a longer string
+they interpolate like any other value, as in `"Curlyfries ${random.string.8}"`.
+
+A name in the reserved namespace that is not one of the above fails the run with
+a message naming the placeholder — for example
+`` invalid random value `random.int.9.2`: minimum 9 is greater than maximum 2 ``.
+A name outside the namespace is an ordinary variable and still fails as
+`undefined variable` when nothing defines it.
+
+```bash
+curlyfries run ships/create                                    # a fresh ship every run
+curlyfries run ships/create --var random.string.8=fixed --var random.int.1.500=42  # reproducible
+```
+
 Template syntax is validated when a request is loaded, but variables are looked
 up when the request runs, so `${token}` is legal in a file that no environment
-can satisfy — until you run it.
+can satisfy — until you run it. Random names parse like any other (they match
+`[A-Za-z_][A-Za-z0-9_.-]*`) but are generated when the request runs.
 
 ## Outputs (expressions)
 
@@ -196,7 +233,7 @@ A miss in every scope is `error: undefined variable `<name>` in <file>` with the
 error: undefined variable `token` in requests/auth/me.json
   at:    /headers/Authorization
   value: "Bearer ${token}"
-  known: environment `dev` → admiral, baseUrl, limit, pirate, ship
+  known: environment `dev` → admiral, baseUrl, limit, pirate
          session           → (none)
 ```
 
@@ -279,15 +316,17 @@ error: unreadable session file .curlyfries/session.json
 | `auth/me` | `Authorization: Bearer ${token}` resolved from the session |
 | `ships/list` | `limit=${limit}` from the environment plus a header capture (`shipCount`) |
 | `ships/detail` | nested capture `response.body.pirates[0].name` |
-| `ships/create` | `Authorization` + `body: "${ship}"`, capturing `shipId` and `shipName` |
+| `ships/create` | `Authorization` + an inline body built from `${random.string.8}` and `${random.int.1.500}`, capturing `shipId` and `shipName` |
 | `ships/delete` | `DELETE /ships/${shipId}` with the admiral token |
-| `debug/echo` | proves typed substitution: `/_debug/echo` reports `"typed":42` and `"limit":2` as numbers, with `content_type: application/json` |
+| `debug/echo` | proves typed substitution: `/_debug/echo` reports `"typed":42`, `"limit":2` and a `${random.bool}` flag with their JSON types, with `content_type: application/json` |
 | `debug/slow` | the `--timeout` path (`curlyfries run debug/slow --timeout 1` exits `1`) |
 | `ships/missing` | a `404` is a normal result: exit `0`, or `4` with `--fail-on-error` |
 
-`ship.name` is unique on that API, so **re-running `ships/create` with the same
-name legitimately returns `409`** (duplicate name) instead of `201`. That error
-envelope has no `id`, so the capture refuses to invent one:
+`ship.name` is unique on that API, so `ships/create` derives a fresh name from
+`${random.string.8}` on every run and can be run repeatedly. The uniqueness rule
+is still visible: pin the random part with `--var` and run twice, and the second
+`201` becomes a `409` (duplicate name). That error envelope has no `id`, so the
+capture refuses to invent one:
 
 ```
 error: output `shipId` failed in requests/ships/create.json
@@ -295,11 +334,9 @@ error: output `shipId` failed in requests/ships/create.json
   reason: no key `id` in object (available: error, requestId)
 ```
 
-Exit code `3` — the loud answer, rather than a silently missing `shipId`. Use a
-different ship (or restart the server for a fresh seed):
+Exit code `3` — the loud answer, rather than a silently missing `shipId`:
 
 ```bash
-curlyfries run ships/create --var 'ship={"name":"Second Breakfast","class":"sloop","crewCapacity":9,"homePort":"Nassau","status":"docked","launchedYear":1720}'
+curlyfries run ships/create --var random.string.8=pinned
+curlyfries run ships/create --var random.string.8=pinned   # 409, exit 3
 ```
-
-That prints `201` and captures `shipId` and `shipName` from the new ship.

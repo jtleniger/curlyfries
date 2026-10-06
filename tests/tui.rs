@@ -26,6 +26,12 @@ const SHIPS: &str = r#"{
   "path": "/ships?limit=${limit}"
 }"#;
 
+const CREATE: &str = r#"{
+  "method": "POST",
+  "path": "/ships",
+  "outputs": [ { "shipId": "response.body.id" } ]
+}"#;
+
 /// A key press with no modifiers.
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -117,6 +123,39 @@ fn enter_runs_the_selected_request_and_shows_the_response() {
 }
 
 #[test]
+fn failed_output_keeps_the_response_and_shows_a_section() {
+    let server = StubServer::start(|_| {
+        vec![StubResponse::json(
+            400,
+            "Bad Request",
+            r#"{"error":"ship already exists"}"#,
+        )]
+    });
+    let dir = project_fixture(
+        "tui-output-error",
+        &server,
+        &[("requests/ships/create.json", CREATE)],
+    );
+    let mut app = open(config(), &dir);
+    app.select_id("ships/create");
+    app.on_key(key(KeyCode::Enter));
+    app.wait_for_run(Duration::from_secs(5));
+
+    let screen = rendered(&mut app, 100, 40);
+    assert!(screen.contains("400 Bad Request"), "{screen}");
+    assert!(screen.contains("Output error"), "{screen}");
+    assert!(screen.contains("no key `id`"), "{screen}");
+    assert!(screen.contains("ship already exists"), "{screen}");
+
+    // The error text wraps rather than being clipped when the pane narrows.
+    let narrow = rendered(&mut app, 70, 40);
+    assert!(narrow.contains("400 Bad Request"), "{narrow}");
+    assert!(narrow.contains("available"), "{narrow}");
+
+    let _ = server.finish();
+}
+
+#[test]
 fn switching_environment_changes_the_scope() {
     let server = StubServer::start(|_| Vec::new());
     let dir = project_fixture(
@@ -145,17 +184,19 @@ fn switching_environment_changes_the_scope() {
 }
 
 #[test]
-fn resolved_and_raw_request_views_differ() {
+fn resolved_and_definition_request_views_differ() {
     let server = StubServer::start(|_| Vec::new());
     let dir = project_fixture("tui-views", &server, &[("requests/ships/list.json", SHIPS)]);
     let mut app = open(config(), &dir);
     let resolved = rendered(&mut app, 120, 40);
     assert!(resolved.contains("limit=2"), "{resolved}");
     assert!(!resolved.contains("${limit}"), "{resolved}");
+    assert!(resolved.contains("url"), "{resolved}");
 
     app.on_key(key(KeyCode::Char('v')));
-    let raw = rendered(&mut app, 120, 40);
-    assert!(raw.contains("${limit}"), "{raw}");
+    let definition = rendered(&mut app, 120, 40);
+    assert!(definition.contains("${limit}"), "{definition}");
+    assert!(definition.contains("Request — definition"), "{definition}");
 }
 
 #[test]

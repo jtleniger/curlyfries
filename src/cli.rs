@@ -272,6 +272,9 @@ fn run_requests<W: Write, E: Write>(
     let mut runner = build_runner(cli, project, entries, &mut session)?;
     for id in ids {
         let outcome = runner.execute_id(id)?;
+        if let Some(error) = outcome.capture_error {
+            return Err(error);
+        }
         if opts.json {
             let line = render::json_line(&outcome.request, &outcome.response, &outcome.captured);
             writeln!(out, "{line}").map_err(io_error)?;
