@@ -23,17 +23,13 @@ use crate::tui::theme::Theme;
 use crate::tui::tree::{self, TreeRow};
 use crate::tui::ui;
 
-/// Configuration captured from the CLI for one TUI session.
-#[derive(Debug, Clone)]
-pub struct TuiConfig {
-    /// `--env`.
-    pub env: Option<String>,
-    /// `--var` overrides, already parsed to JSON values.
-    pub overrides: Map,
-    /// `--no-session`.
-    pub no_session: bool,
-    /// `--timeout`, `None` disables timeouts.
-    pub timeout: Option<Duration>,
+/// A destructive capture clear waiting for confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PendingClear {
+    /// The active scope only.
+    Scope,
+    /// Every scope in the session file.
+    All,
 }
 
 /// Which request tab the request pane shows.
@@ -100,9 +96,7 @@ pub struct App {
     pub(crate) selected_id: Option<String>,
     pub(crate) env_name: Option<String>,
     env: Map,
-    pub(crate) overrides: Map,
     timeout: Option<Duration>,
-    pub(crate) no_session: bool,
     session: Session,
     pub(crate) request_view: RequestView,
     resolved_view: Vec<Line<'static>>,
@@ -116,6 +110,7 @@ pub struct App {
     last: Option<LastRun>,
     env_choices: Vec<EnvChoice>,
     pub(crate) env_picker: Option<usize>,
+    pub(crate) confirm: Option<PendingClear>,
     pub(crate) help: bool,
     pub(crate) status_message: Option<String>,
     quit: bool,
@@ -124,12 +119,13 @@ pub struct App {
 
 impl App {
     /// Loads definitions, resolves the environment and reads the session.
-    pub fn new(config: TuiConfig, project: Project, entries: Vec<Entry>) -> Result<App, Error> {
-        let (env_name, env) = match project::resolve_environment(&project, config.env.as_deref())? {
+    pub fn new(project: Project, entries: Vec<Entry>) -> Result<App, Error> {
+        let (env_name, env) = match project::resolve_environment(&project)? {
             Some((name, vars)) => (Some(name), vars),
             None => (None, Map::new()),
         };
-        let session = Session::load(&project.root, !config.no_session)?;
+        let timeout = project.manifest.timeout();
+        let session = Session::load(&project.root)?;
 
         let mut defs = Vec::with_capacity(entries.len());
         let mut definition_files = Vec::with_capacity(entries.len());
@@ -164,9 +160,7 @@ impl App {
             selected_id,
             env_name,
             env,
-            overrides: config.overrides,
-            timeout: config.timeout,
-            no_session: config.no_session,
+            timeout,
             session,
             request_view: RequestView::Resolved,
             resolved_view: Vec::new(),
@@ -180,6 +174,7 @@ impl App {
             last: None,
             env_choices,
             env_picker: None,
+            confirm: None,
             help: false,
             status_message: None,
             quit: false,
@@ -200,6 +195,10 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return;
         }
+        if self.confirm.is_some() {
+            self.confirm_key(key);
+            return;
+        }
         if self.env_picker.is_some() {
             self.picker_key(key);
             return;
@@ -210,6 +209,13 @@ impl App {
         }
         if self.filter_active {
             self.filter_key(key);
+            return;
+        }
+        if let KeyCode::Char(character @ ('x' | 'X')) = key.code
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+        {
+            self.request_clear(character == 'X');
             return;
         }
         self.normal_key(key);
@@ -449,6 +455,51 @@ impl App {
         }
     }
 
+    /// Asks to clear captures, or refuses while a request is in flight.
+    fn request_clear(&mut self, all: bool) {
+        if self.running {
+            self.status_message = Some("wait for the running request to finish".to_string());
+            return;
+        }
+        self.confirm = Some(if all {
+            PendingClear::All
+        } else {
+            PendingClear::Scope
+        });
+    }
+
+    /// Handles a key while the clear confirmation is up.
+    fn confirm_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
+                let all = matches!(self.confirm, Some(PendingClear::All));
+                self.confirm = None;
+                self.apply_clear(all);
+            }
+            KeyCode::Esc | KeyCode::Char('n' | 'N') => self.confirm = None,
+            _ => {}
+        }
+    }
+
+    /// Clears the active scope, or every scope, and reports the outcome.
+    fn apply_clear(&mut self, all: bool) {
+        let scope = self.scope().to_string();
+        let removed = if all {
+            self.session.clear(None)
+        } else {
+            self.session.clear(Some(&scope))
+        };
+        self.status_message = Some(if removed == 0 {
+            "no captured variables to clear".to_string()
+        } else {
+            match self.session.save() {
+                Ok(()) => format!("cleared {removed} captured variable(s)"),
+                Err(error) => format!("error: {error}"),
+            }
+        });
+        self.refresh_request_views();
+    }
+
     // --- state transitions -------------------------------------------------
 
     /// Moves the selection over selectable rows, wrapping at both ends.
@@ -590,7 +641,6 @@ impl App {
                 env_name: self.env_name.as_deref(),
                 env: &self.env,
                 session: self.session.vars(self.scope()),
-                overrides: &self.overrides,
             };
             match execute::render_request(&self.defs[index], &scopes) {
                 Ok(request) => resolved_lines(&request, &theme),
@@ -652,14 +702,10 @@ impl App {
         let scope = self.scope().to_string();
         let (tx, rx) = std::sync::mpsc::channel();
         let (project, entries) = (self.project.clone(), self.entries.clone());
-        let (env_name, env, overrides) = (
-            self.env_name.clone(),
-            self.env.clone(),
-            self.overrides.clone(),
-        );
-        let (timeout, no_session) = (self.timeout, self.no_session);
+        let (env_name, env) = (self.env_name.clone(), self.env.clone());
+        let timeout = self.timeout;
         std::thread::spawn(move || {
-            let mut session = match Session::load(&project.root, !no_session) {
+            let mut session = match Session::load(&project.root) {
                 Ok(session) => session,
                 Err(error) => {
                     let _ = tx.send(RunMsg {
@@ -675,7 +721,6 @@ impl App {
                 entries: &entries,
                 env_name: env_name.clone(),
                 env,
-                overrides,
                 session: &mut session,
                 client: execute::client(timeout),
                 timeout,
@@ -776,13 +821,7 @@ mod tests {
 
     fn app() -> (TempDir, App) {
         let (dir, project, entries) = fixture();
-        let config = TuiConfig {
-            env: None,
-            overrides: Map::new(),
-            no_session: true,
-            timeout: None,
-        };
-        let app = App::new(config, project, entries).unwrap();
+        let app = App::new(project, entries).unwrap();
         (dir, app)
     }
 

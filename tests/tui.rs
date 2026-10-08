@@ -5,13 +5,13 @@ mod support;
 use std::fs;
 use std::time::Duration;
 
-use curlyfries::tui::TuiConfig;
+use curlyfries::project::Project;
 use curlyfries::tui::app::App;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use serde_json::json;
-use support::{StubResponse, StubServer, load_project, project_fixture};
+use serde_json::{Value, json};
+use support::{StubResponse, StubServer, TempDir, load_project, project_fixture};
 
 const LOGIN: &str = r#"{
   "name": "Log in",
@@ -58,19 +58,21 @@ fn rendered(app: &mut App, width: u16, height: u16) -> String {
     text
 }
 
-/// Opens the fixture project with the given config.
-fn open(config: TuiConfig, dir: &support::TempDir) -> App {
-    let (project, entries) = load_project(dir);
-    App::new(config, project, entries).expect("app builds")
+/// Builds an app over the fixture project.
+fn build(dir: &TempDir) -> (Project, Vec<curlyfries::project::Entry>) {
+    load_project(dir)
 }
 
-fn config() -> TuiConfig {
-    TuiConfig {
-        env: None,
-        overrides: curlyfries::Map::new(),
-        no_session: false,
-        timeout: Some(Duration::from_secs(5)),
-    }
+/// Opens the fixture project.
+fn open(dir: &TempDir) -> App {
+    let (project, entries) = build(dir);
+    App::new(project, entries).expect("app builds")
+}
+
+/// The parsed session file.
+fn session_json(dir: &TempDir) -> Value {
+    let text = fs::read_to_string(dir.child(".curlyfries/session.json")).expect("session file");
+    serde_json::from_str(&text).expect("session JSON")
 }
 
 #[test]
@@ -84,7 +86,7 @@ fn tree_lists_requests_and_folders() {
             ("requests/ships/list.json", SHIPS),
         ],
     );
-    let mut app = open(config(), &dir);
+    let mut app = open(&dir);
     let screen = rendered(&mut app, 120, 40);
     assert!(screen.contains("auth/"), "{screen}");
     assert!(screen.contains("ships/"), "{screen}");
@@ -102,7 +104,7 @@ fn enter_runs_the_selected_request_and_shows_the_response() {
         )]
     });
     let dir = project_fixture("tui-run", &server, &[("requests/auth/login.json", LOGIN)]);
-    let mut app = open(config(), &dir);
+    let mut app = open(&dir);
     app.select_id("auth/login");
     app.on_key(key(KeyCode::Enter));
     app.wait_for_run(Duration::from_secs(5));
@@ -112,12 +114,9 @@ fn enter_runs_the_selected_request_and_shows_the_response() {
     assert!(screen.contains("token"), "{screen}");
     assert!(screen.contains("tok-123"), "{screen}");
 
-    let text = fs::read_to_string(dir.child(".curlyfries/session.json")).expect("session file");
-    let stored: serde_json::Value = serde_json::from_str(&text).expect("session JSON");
     assert_eq!(
-        stored["varScopes"]["dev"]["token"],
-        json!("tok-123"),
-        "{text}"
+        session_json(&dir)["varScopes"]["dev"]["token"],
+        json!("tok-123")
     );
     let _ = server.finish();
 }
@@ -136,7 +135,7 @@ fn failed_output_keeps_the_response_and_shows_a_section() {
         &server,
         &[("requests/ships/create.json", CREATE)],
     );
-    let mut app = open(config(), &dir);
+    let mut app = open(&dir);
     app.select_id("ships/create");
     app.on_key(key(KeyCode::Enter));
     app.wait_for_run(Duration::from_secs(5));
@@ -170,7 +169,7 @@ fn switching_environment_changes_the_scope() {
         "environments/prod.json",
         &format!(r#"{{ "baseUrl": "{}" }}"#, server.base_url),
     );
-    let mut app = open(config(), &dir);
+    let mut app = open(&dir);
     let before = rendered(&mut app, 120, 40);
     assert!(before.contains("env: dev"), "{before}");
     assert!(before.contains("Captures — dev"), "{before}");
@@ -187,7 +186,7 @@ fn switching_environment_changes_the_scope() {
 fn resolved_and_definition_request_views_differ() {
     let server = StubServer::start(|_| Vec::new());
     let dir = project_fixture("tui-views", &server, &[("requests/ships/list.json", SHIPS)]);
-    let mut app = open(config(), &dir);
+    let mut app = open(&dir);
     let resolved = rendered(&mut app, 120, 40);
     assert!(resolved.contains("limit=2"), "{resolved}");
     assert!(!resolved.contains("${limit}"), "{resolved}");
@@ -200,22 +199,138 @@ fn resolved_and_definition_request_views_differ() {
 }
 
 #[test]
-fn no_session_marks_captures_disabled() {
+fn clear_scope_needs_confirmation_and_removes_the_scope() {
+    let server = StubServer::start(|_| {
+        vec![StubResponse::json(
+            200,
+            "OK",
+            r#"{"access_token":"tok-123"}"#,
+        )]
+    });
+    let dir = project_fixture("tui-clear", &server, &[("requests/auth/login.json", LOGIN)]);
+    let mut app = open(&dir);
+    app.select_id("auth/login");
+    app.on_key(key(KeyCode::Enter));
+    app.wait_for_run(Duration::from_secs(5));
+    assert_eq!(
+        session_json(&dir)["varScopes"]["dev"]["token"],
+        json!("tok-123")
+    );
+
+    // `x` asks first and changes nothing on its own.
+    app.on_key(key(KeyCode::Char('x')));
+    let asking = rendered(&mut app, 120, 40);
+    assert!(asking.contains("Clear captures"), "{asking}");
+    assert!(
+        asking.contains("delete every captured variable in scope `dev`"),
+        "{asking}"
+    );
+    assert_eq!(
+        session_json(&dir)["varScopes"]["dev"]["token"],
+        json!("tok-123")
+    );
+
+    // `Esc` cancels and leaves the scope alone.
+    app.on_key(key(KeyCode::Esc));
+    let cancelled = rendered(&mut app, 120, 40);
+    assert!(!cancelled.contains("delete every captured variable"), "{cancelled}");
+    assert_eq!(
+        session_json(&dir)["varScopes"]["dev"]["token"],
+        json!("tok-123")
+    );
+
+    // `y` confirms and removes the active scope.
+    app.on_key(key(KeyCode::Char('x')));
+    app.on_key(key(KeyCode::Char('y')));
+    let cleared = rendered(&mut app, 120, 40);
+    assert!(cleared.contains("no captured variables"), "{cleared}");
+    assert!(
+        session_json(&dir)["varScopes"].get("dev").is_none(),
+        "scope must be gone"
+    );
+    let _ = server.finish();
+}
+
+#[test]
+fn clear_all_removes_every_scope() {
     let server = StubServer::start(|_| Vec::new());
     let dir = project_fixture(
-        "tui-no-session",
+        "tui-clear-all",
         &server,
         &[(
             "requests/ships/list.json",
             r#"{ "method": "GET", "path": "/ships" }"#,
         )],
     );
-    let mut conf = config();
-    conf.no_session = true;
-    let mut app = open(conf, &dir);
+    dir.write(
+        ".curlyfries/session.json",
+        r#"{ "version": 1, "updatedAtUnix": 1, "varScopes": {
+            "dev": { "token": "a" },
+            "stage": { "token": "b" }
+        } }"#,
+    );
+    let mut app = open(&dir);
+    app.on_key(key(KeyCode::Char('X')));
+    let asking = rendered(&mut app, 120, 40);
+    assert!(
+        asking.contains("delete every captured variable in every scope"),
+        "{asking}"
+    );
+    app.on_key(key(KeyCode::Char('y')));
+    assert_eq!(session_json(&dir)["varScopes"], json!({}));
+}
+
+#[test]
+fn manifest_timeout_reaches_the_client() {
+    let server = StubServer::start_silent();
+    let dir = project_fixture(
+        "tui-timeout",
+        &server,
+        &[(
+            "requests/debug/slow.json",
+            r#"{"method":"GET","path":"/_debug/slow?ms=3000"}"#,
+        )],
+    );
+    dir.write(
+        "curlyfries.json",
+        r#"{ "defaultEnvironment": "dev", "timeout": 1 }"#,
+    );
+    let mut app = open(&dir);
+    app.select_id("debug/slow");
+    app.on_key(key(KeyCode::Enter));
+    app.wait_for_run(Duration::from_secs(5));
     let screen = rendered(&mut app, 120, 40);
-    assert!(screen.contains("session disabled"), "{screen}");
-    assert!(screen.contains("session: off"), "{screen}");
+    assert!(screen.contains("timed out after 1s"), "{screen}");
+    let _ = server.finish();
+}
+
+#[test]
+fn broken_session_file_is_an_error() {
+    let server = StubServer::start(|_| Vec::new());
+    let dir = project_fixture(
+        "tui-broken-session",
+        &server,
+        &[(
+            "requests/ships/list.json",
+            r#"{ "method": "GET", "path": "/ships" }"#,
+        )],
+    );
+    dir.write(
+        ".curlyfries/session.json",
+        r#"{ "version": 2, "updatedAtUnix": 1, "varScopes": {} }"#,
+    );
+    let (project, entries) = build(&dir);
+    let error = match App::new(project, entries) {
+        Ok(_) => panic!("a broken session file must fail"),
+        Err(error) => error,
+    };
+    let text = error.to_string();
+    assert!(text.contains("unreadable session file"), "{text}");
+    assert!(
+        text.contains("unsupported version 2 (expected 1)"),
+        "{text}"
+    );
+    let _ = server.finish();
 }
 
 #[test]
@@ -229,11 +344,12 @@ fn help_overlay_lists_the_bindings() {
             r#"{ "method": "GET", "path": "/ships" }"#,
         )],
     );
-    let mut app = open(config(), &dir);
+    let mut app = open(&dir);
     app.on_key(key_mod(KeyCode::Char('?'), KeyModifiers::SHIFT));
     let screen = rendered(&mut app, 120, 40);
     assert!(screen.contains("Help"), "{screen}");
     assert!(screen.contains("run the selected request"), "{screen}");
+    assert!(screen.contains("clear captures"), "{screen}");
     app.on_key(key(KeyCode::Esc));
     let closed = rendered(&mut app, 120, 40);
     assert!(!closed.contains("run the selected request"), "{closed}");

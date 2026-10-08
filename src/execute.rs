@@ -535,12 +535,11 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn scopes_of<'a>(env: &'a Map, session: &'a Map, overrides: &'a Map) -> Scopes<'a> {
+    fn scopes_of<'a>(env: &'a Map, session: &'a Map) -> Scopes<'a> {
         Scopes {
             env_name: Some("dev"),
             env,
             session,
-            overrides,
         }
     }
 
@@ -555,7 +554,7 @@ mod tests {
     fn absolute_paths_pass_through() {
         let env = map(&[("baseUrl", json!("http://127.0.0.1:1"))]);
         let empty = Map::new();
-        let scopes = scopes_of(&env, &empty, &empty);
+        let scopes = scopes_of(&env, &empty);
         assert_eq!(
             build_url(
                 "x",
@@ -571,14 +570,14 @@ mod tests {
     #[test]
     fn base_url_is_joined_without_double_slashes() {
         let empty = Map::new();
-        let overrides = map(&[("baseUrl", json!("http://host:4000/"))]);
-        let scopes = scopes_of(&empty, &empty, &overrides);
+        let env = map(&[("baseUrl", json!("http://host:4000/"))]);
+        let scopes = scopes_of(&env, &empty);
         assert_eq!(
             build_url("x", Path::new("requests/x.json"), "/ships?limit=2", &scopes).unwrap(),
             "http://host:4000/ships?limit=2"
         );
         let env = map(&[("baseUrl", json!("http://host:4000"))]);
-        let scopes = scopes_of(&env, &empty, &empty);
+        let scopes = scopes_of(&env, &empty);
         assert_eq!(
             build_url("x", Path::new("requests/x.json"), "ships", &scopes).unwrap(),
             "http://host:4000/ships"
@@ -592,7 +591,7 @@ mod tests {
     #[test]
     fn missing_base_url_names_the_environment() {
         let empty = Map::new();
-        let scopes = scopes_of(&empty, &empty, &empty);
+        let scopes = scopes_of(&empty, &empty);
         let err = build_url(
             "ships/list",
             Path::new("requests/ships/list.json"),
@@ -610,10 +609,10 @@ mod tests {
         assert_eq!(err.exit_code(), 3);
 
         let null_base = map(&[("baseUrl", json!(null))]);
-        let scopes = scopes_of(&empty, &empty, &null_base);
+        let scopes = scopes_of(&null_base, &empty);
         assert!(build_url("x", Path::new("requests/x.json"), "/ships", &scopes).is_err());
         let empty_base = map(&[("baseUrl", json!(""))]);
-        let scopes = scopes_of(&empty, &empty, &empty_base);
+        let scopes = scopes_of(&empty_base, &empty);
         assert!(build_url("x", Path::new("requests/x.json"), "/ships", &scopes).is_err());
     }
 
@@ -638,7 +637,7 @@ mod tests {
             ("empty", json!("")),
         ]);
         let empty = Map::new();
-        let scopes = scopes_of(&env, &empty, &empty);
+        let scopes = scopes_of(&env, &empty);
         let resolved = render_request(&def, &scopes).unwrap();
         assert_eq!(resolved.url, "http://host:4000/ships?limit=42");
         assert_eq!(resolved.name, "ships/create");
@@ -670,7 +669,7 @@ mod tests {
         )
         .unwrap();
         let empty = Map::new();
-        let scopes = scopes_of(&empty, &empty, &empty);
+        let scopes = scopes_of(&empty, &empty);
         let resolved = render_request(&def, &scopes).unwrap();
         assert_eq!(resolved.body.as_deref(), Some("\"hello\""));
         assert_eq!(
@@ -694,7 +693,7 @@ mod tests {
         .unwrap();
         let env = map(&[("baseUrl", json!("http://host")), ("apiKey", json!("k"))]);
         let empty = Map::new();
-        let scopes = scopes_of(&env, &empty, &empty);
+        let scopes = scopes_of(&env, &empty);
 
         let err = render_request(&def, &scopes).unwrap_err();
         match &err {
@@ -712,7 +711,7 @@ mod tests {
         }
 
         let session = map(&[("token", json!("abc"))]);
-        let scopes = scopes_of(&env, &session, &empty);
+        let scopes = scopes_of(&env, &session);
         let err = render_request(&def, &scopes).unwrap_err();
         match &err {
             Error::UndefinedVariable { pointer, name, .. } => {
@@ -733,7 +732,7 @@ mod tests {
         .unwrap();
         let env = map(&[("baseUrl", json!("http://host"))]);
         let empty = Map::new();
-        let scopes = scopes_of(&env, &empty, &empty);
+        let scopes = scopes_of(&env, &empty);
         let err = render_request(&def, &scopes).unwrap_err();
         let text = err.to_string();
         assert!(text.contains("at:    /body"), "{text}");
@@ -750,7 +749,7 @@ mod tests {
         .unwrap();
         let env = map(&[("baseUrl", json!("http://host")), ("limit", json!(null))]);
         let empty = Map::new();
-        let scopes = scopes_of(&env, &empty, &empty);
+        let scopes = scopes_of(&env, &empty);
         let err = render_request(&def, &scopes).unwrap_err();
         assert!(
             err.to_string().contains("variable `limit` is null"),

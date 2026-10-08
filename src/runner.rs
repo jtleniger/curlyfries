@@ -1,4 +1,4 @@
-//! The single execution path shared by `run` and interactive mode.
+//! The single execution path behind the terminal UI.
 
 use std::time::Duration;
 
@@ -20,8 +20,6 @@ pub struct Runner<'a> {
     pub env_name: Option<String>,
     /// Variables from the selected environment.
     pub env: Map,
-    /// `--var` overrides.
-    pub overrides: Map,
     /// Capture store, persisted between invocations.
     pub session: &'a mut Session,
     /// HTTP agent.
@@ -62,7 +60,6 @@ impl Runner<'_> {
                 env_name: self.env_name.as_deref(),
                 env: &self.env,
                 session: self.session.vars(&scope),
-                overrides: &self.overrides,
             };
             execute::render_request(&def, &scopes)?
         };

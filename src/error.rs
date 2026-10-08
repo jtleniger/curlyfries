@@ -137,7 +137,7 @@ pub enum Error {
         reason: String,
     },
     /// A relative request path could not be joined to a base URL.
-    #[error("error: no base URL for request `{request_id}`\n  path: {resolved}\n  hint: add \"baseUrl\" to {env_file}, or pass --var baseUrl=http://host:port, or use an absolute URL", resolved = json_string(resolved), env_file = env_file_name(env))]
+    #[error("error: no base URL for request `{request_id}`\n  path: {resolved}\n  hint: add \"baseUrl\" to {env_file}, or use an absolute URL", resolved = json_string(resolved), env_file = env_file_name(env))]
     MissingBaseUrl {
         /// Request id.
         request_id: String,
@@ -187,13 +187,11 @@ pub enum Error {
         path: PathBuf,
         /// What is wrong with it.
         reason: String,
-        /// Whether to suggest `session clear --all`.
+        /// Whether to suggest clearing the captures.
         hint: bool,
     },
-    /// Interactive mode was requested without a terminal.
-    #[error(
-        "error: interactive mode requires a terminal; use `curlyfries run <id>`\n  not a terminal: {stream}"
-    )]
+    /// The UI was requested without a terminal.
+    #[error("error: curlyfries needs a terminal\n  not a terminal: {stream}")]
     NotATerminal {
         /// Which standard stream is not a terminal.
         stream: &'static str,
@@ -210,7 +208,7 @@ impl Error {
     /// Process exit code for this failure.
     ///
     /// `1` filesystem/environment, `3` project/request definition. Usage errors
-    /// (exit `2`) come from the argument parser, `4` from `--fail-on-error`.
+    /// (exit `2`) come from the argument parser.
     pub fn exit_code(&self) -> u8 {
         match self {
             Error::Io { .. }
@@ -348,7 +346,8 @@ fn env_file_name(env: &Option<String>) -> String {
 
 fn session_hint(hint: &bool) -> String {
     if *hint {
-        "\n  hint:  delete the file or run `curlyfries session clear --all`".to_string()
+        "\n  hint:  delete the file, or press x in the terminal UI to clear the captures"
+            .to_string()
     } else {
         String::new()
     }
@@ -437,7 +436,7 @@ mod tests {
             text.contains("unsupported version 2 (expected 1)"),
             "{text}"
         );
-        assert!(text.contains("session clear --all"), "{text}");
+        assert!(text.contains("press x"), "{text}");
         let plain = Error::SessionFile {
             path: PathBuf::from("s.json"),
             reason: "boom".to_string(),

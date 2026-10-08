@@ -33,7 +33,6 @@ pub struct Session {
     /// Path the session would be written to.
     pub path: PathBuf,
     scopes: BTreeMap<String, Map>,
-    persist: bool,
 }
 
 /// On-disk shape of the session file.
@@ -46,27 +45,15 @@ struct SessionFile {
 }
 
 impl Session {
-    /// Loads the session for `root`. With `persist == false` (`--no-session`)
-    /// nothing is read and nothing will ever be written.
-    pub fn load(root: &Path, persist: bool) -> Result<Session, Error> {
+    /// Loads the session for `root`, or an empty store when no file exists.
+    pub fn load(root: &Path) -> Result<Session, Error> {
         let path = root.join(SESSION_DIR).join(SESSION_FILE);
-        if !persist {
-            return Ok(Session {
-                path,
-                scopes: BTreeMap::new(),
-                persist: false,
-            });
-        }
         let scopes = if path.is_file() {
             read_scopes(&path)?
         } else {
             BTreeMap::new()
         };
-        Ok(Session {
-            path,
-            scopes,
-            persist: true,
-        })
+        Ok(Session { path, scopes })
     }
 
     /// Variables stored in `scope`, empty when the scope is unknown.
@@ -104,9 +91,6 @@ impl Session {
 
     /// Writes the session file atomically (temp file plus rename).
     pub fn save(&self) -> Result<(), Error> {
-        if !self.persist {
-            return Ok(());
-        }
         if let Some(dir) = self.path.parent()
             && !dir.as_os_str().is_empty()
         {
@@ -220,7 +204,7 @@ mod tests {
     #[test]
     fn missing_file_loads_empty() {
         let dir = TempDir::new("session-empty");
-        let session = Session::load(dir.path(), true).unwrap();
+        let session = Session::load(dir.path()).unwrap();
         assert!(session.vars("dev").is_empty());
         assert!(session.path.ends_with(".curlyfries/session.json"));
     }
@@ -228,7 +212,7 @@ mod tests {
     #[test]
     fn save_and_load_round_trip_per_scope() {
         let dir = TempDir::new("session-round");
-        let mut session = Session::load(dir.path(), true).unwrap();
+        let mut session = Session::load(dir.path()).unwrap();
         assert!(session.set("dev", map(&[("token", json!("abc")), ("shipId", json!(6))])));
         assert!(session.set(NO_ENV_KEY, map(&[("loose", json!(true))])));
         session.save().unwrap();
@@ -246,7 +230,7 @@ mod tests {
             "temp file must be renamed away"
         );
 
-        let reloaded = Session::load(dir.path(), true).unwrap();
+        let reloaded = Session::load(dir.path()).unwrap();
         assert_eq!(reloaded.vars("dev")["token"], json!("abc"));
         assert_eq!(reloaded.vars("dev")["shipId"], json!(6));
         assert_eq!(reloaded.vars(NO_ENV_KEY)["loose"], json!(true));
@@ -258,48 +242,33 @@ mod tests {
     }
 
     #[test]
-    fn no_session_never_reads_or_writes() {
-        let dir = TempDir::new("session-none");
-        let mut session = Session::load(dir.path(), true).unwrap();
-        session.set("dev", map(&[("token", json!("abc"))]));
-        session.save().unwrap();
-
-        let mut disabled = Session::load(dir.path(), false).unwrap();
-        assert!(disabled.vars("dev").is_empty());
-        assert!(disabled.set("dev", map(&[("token", json!("other"))])));
-        disabled.save().unwrap();
-        let stored = Session::load(dir.path(), true).unwrap();
-        assert_eq!(stored.vars("dev")["token"], json!("abc"));
-    }
-
-    #[test]
     fn unsupported_version_and_unknown_field_are_errors() {
         let dir = TempDir::new("session-version");
         dir.write(
             ".curlyfries/session.json",
             r#"{ "version": 2, "updatedAtUnix": 1, "varScopes": {} }"#,
         );
-        let err = Session::load(dir.path(), true).unwrap_err();
+        let err = Session::load(dir.path()).unwrap_err();
         assert!(
             err.to_string()
                 .contains("unsupported version 2 (expected 1)"),
             "{err}"
         );
-        assert!(err.to_string().contains("session clear --all"), "{err}");
+        assert!(err.to_string().contains("press x"), "{err}");
         assert_eq!(err.exit_code(), 1);
 
         dir.write(
             ".curlyfries/session.json",
             r#"{ "version": 1, "updatedAtUnix": 1, "varScopes": {}, "extra": 1 }"#,
         );
-        let err = Session::load(dir.path(), true).unwrap_err();
+        let err = Session::load(dir.path()).unwrap_err();
         assert!(err.to_string().contains("unknown key `extra`"), "{err}");
 
         dir.write(
             ".curlyfries/session.json",
             r#"{ "version": 1, "updatedAtUnix": 1, "varScopes": { "dev": 3 } }"#,
         );
-        let err = Session::load(dir.path(), true).unwrap_err();
+        let err = Session::load(dir.path()).unwrap_err();
         assert!(
             err.to_string()
                 .contains("`varScopes.dev` must be an object"),
@@ -310,14 +279,14 @@ mod tests {
             ".curlyfries/session.json",
             r#"{ "version": "1", "updatedAtUnix": 1, "varScopes": {} }"#,
         );
-        let err = Session::load(dir.path(), true).unwrap_err();
+        let err = Session::load(dir.path()).unwrap_err();
         assert!(
             err.to_string().contains("missing or invalid `version`"),
             "{err}"
         );
 
         dir.write(".curlyfries/session.json", "{");
-        let err = Session::load(dir.path(), true).unwrap_err();
+        let err = Session::load(dir.path()).unwrap_err();
         assert!(err.to_string().contains("invalid JSON"), "{err}");
         assert!(err.to_string().contains("session.json"), "{err}");
     }
@@ -325,7 +294,7 @@ mod tests {
     #[test]
     fn clear_removes_one_scope_or_all() {
         let dir = TempDir::new("session-clear");
-        let mut session = Session::load(dir.path(), true).unwrap();
+        let mut session = Session::load(dir.path()).unwrap();
         session.set("dev", map(&[("a", json!(1)), ("b", json!(2))]));
         session.set("stage", map(&[("c", json!(3))]));
         assert_eq!(session.clear(Some("dev")), 2);
@@ -339,7 +308,7 @@ mod tests {
     #[test]
     fn set_reports_whether_anything_changed() {
         let dir = TempDir::new("session-set");
-        let mut session = Session::load(dir.path(), true).unwrap();
+        let mut session = Session::load(dir.path()).unwrap();
         assert!(!session.set("dev", Map::new()));
         assert!(session.set("dev", map(&[("a", json!(1))])));
         assert!(session.set("dev", map(&[("a", json!(1))])));

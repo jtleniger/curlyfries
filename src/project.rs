@@ -8,6 +8,7 @@
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -20,13 +21,16 @@ pub const MANIFEST_FILE: &str = "curlyfries.json";
 pub const DEFAULT_REQUESTS_DIR: &str = "requests";
 /// Default environments directory.
 pub const DEFAULT_ENVIRONMENTS_DIR: &str = "environments";
+/// Per-request timeout in seconds when the manifest does not say otherwise.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// Manifest keys, in the order they are listed in errors.
-pub const MANIFEST_KEYS: [&str; 5] = [
+pub const MANIFEST_KEYS: [&str; 6] = [
     "requestsDir",
     "environmentsDir",
     "defaultEnvironment",
     "followRedirects",
     "followSymlinks",
+    "timeout",
 ];
 
 /// Parsed `curlyfries.json`.
@@ -36,12 +40,14 @@ pub struct Manifest {
     pub requests_dir: String,
     /// Directory holding environment files, relative to the project root.
     pub environments_dir: String,
-    /// Environment used when `--env` is absent.
+    /// Environment the UI opens on when the manifest names one.
     pub default_environment: Option<String>,
     /// Follow `3xx` redirects that stay on the same origin.
     pub follow_redirects: bool,
     /// Follow symlinks inside the request and environment directories.
     pub follow_symlinks: bool,
+    /// Per-request timeout in seconds; `0` disables timeouts.
+    pub timeout_secs: u64,
 }
 
 impl Default for Manifest {
@@ -52,7 +58,15 @@ impl Default for Manifest {
             default_environment: None,
             follow_redirects: false,
             follow_symlinks: false,
+            timeout_secs: DEFAULT_TIMEOUT_SECS,
         }
+    }
+}
+
+impl Manifest {
+    /// The per-request timeout; `None` disables timeouts.
+    pub fn timeout(&self) -> Option<Duration> {
+        (self.timeout_secs > 0).then(|| Duration::from_secs(self.timeout_secs))
     }
 }
 
@@ -79,11 +93,6 @@ impl Project {
     /// Absolute path of the environment file for `name`.
     pub fn environment_file(&self, name: &str) -> PathBuf {
         self.environments_dir().join(format!("{name}.json"))
-    }
-
-    /// Path of a file relative to the project root, using `/` separators.
-    pub fn relative(&self, path: &Path) -> String {
-        relative_slash(path, &self.root)
     }
 }
 
@@ -207,6 +216,17 @@ pub fn load_manifest(path: &Path) -> Result<Manifest, Error> {
                         format!("`{key}` must be a boolean"),
                     ));
                 }
+            }
+        }
+    }
+    if let Some(value) = map.get("timeout") {
+        match value.as_u64() {
+            Some(seconds) => manifest.timeout_secs = seconds,
+            None => {
+                return Err(schema(
+                    "/timeout",
+                    "`timeout` must be a non-negative integer".to_string(),
+                ));
             }
         }
     }
@@ -387,35 +407,20 @@ pub fn load_environment(project: &Project, name: &str) -> Result<Map, Error> {
     }
 }
 
-/// Picks the environment to use: `--env`, then the manifest default, then the
-/// only available environment, then none.
-pub fn resolve_environment(
-    project: &Project,
-    cli: Option<&str>,
-) -> Result<Option<(String, Map)>, Error> {
-    if let Some(name) = cli {
-        return Ok(Some((name.to_string(), load_environment(project, name)?)));
-    }
+/// Picks the environment to use at startup: the manifest `defaultEnvironment`,
+/// else the only environment file, else none. Several candidates with no default
+/// open the UI on the `(none)` scope, where `e` picks one.
+pub fn resolve_environment(project: &Project) -> Result<Option<(String, Map)>, Error> {
     if let Some(name) = project.manifest.default_environment.clone() {
         return Ok(Some((name.clone(), load_environment(project, &name)?)));
     }
     let available = list_environments(project)?;
-    match available.len() {
-        0 => Ok(None),
-        1 => {
-            let name = available.into_iter().next().expect("one name");
-            let vars = load_environment(project, &name)?;
-            Ok(Some((name, vars)))
-        }
-        _ => Err(Error::Schema {
-            path: project.environments_dir(),
-            pointer: String::new(),
-            message: format!(
-                "multiple environments available; choose one with --env or set \"defaultEnvironment\" (available: {})",
-                available.join(", ")
-            ),
-        }),
+    if available.len() == 1 {
+        let name = available.into_iter().next().expect("one name");
+        let vars = load_environment(project, &name)?;
+        return Ok(Some((name, vars)));
     }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -572,6 +577,41 @@ mod tests {
     }
 
     #[test]
+    fn manifest_timeout_defaults_and_validates() {
+        let default = project_with(&[(MANIFEST_FILE, "{}")]);
+        let manifest = load_manifest(&default.child(MANIFEST_FILE)).unwrap();
+        assert_eq!(manifest.timeout(), Some(Duration::from_secs(30)));
+        assert_eq!(manifest.timeout_secs, DEFAULT_TIMEOUT_SECS);
+
+        let off = project_with(&[(MANIFEST_FILE, r#"{ "timeout": 0 }"#)]);
+        let manifest = load_manifest(&off.child(MANIFEST_FILE)).unwrap();
+        assert_eq!(manifest.timeout(), None);
+
+        let custom = project_with(&[(MANIFEST_FILE, r#"{ "timeout": 5 }"#)]);
+        let manifest = load_manifest(&custom.child(MANIFEST_FILE)).unwrap();
+        assert_eq!(manifest.timeout(), Some(Duration::from_secs(5)));
+
+        for bad in [r#"{ "timeout": -1 }"#, r#"{ "timeout": "x" }"#] {
+            let dir = project_with(&[(MANIFEST_FILE, bad)]);
+            let err = load_manifest(&dir.child(MANIFEST_FILE)).unwrap_err();
+            match err {
+                Error::Schema {
+                    pointer, message, ..
+                } => {
+                    assert_eq!(pointer, "/timeout");
+                    assert!(message.contains("non-negative integer"), "{message}");
+                }
+                other => panic!("wrong error: {other}"),
+            }
+        }
+
+        let unknown = project_with(&[(MANIFEST_FILE, r#"{ "timeouts": 5 }"#)]);
+        let err = load_manifest(&unknown.child(MANIFEST_FILE)).unwrap_err();
+        assert!(err.to_string().contains("unknown key `timeouts`"), "{err}");
+        assert!(err.to_string().contains("timeout"), "{err}");
+    }
+
+    #[test]
     fn requests_are_collected_recursively_sorted_and_filtered() {
         let dir = project_with(&[
             (MANIFEST_FILE, "{}"),
@@ -587,10 +627,7 @@ mod tests {
         let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b/alpha", "b/zeta", "nested/deep/deeper"]);
         assert!(entries[0].file.ends_with("requests/a.json"));
-        assert_eq!(
-            project.relative(&entries[3].file),
-            "requests/nested/deep/deeper.json"
-        );
+        assert!(entries[3].file.ends_with("requests/nested/deep/deeper.json"));
     }
 
     #[test]
@@ -624,8 +661,8 @@ mod tests {
     }
 
     #[test]
-    fn environment_resolution_covers_every_branch() {
-        // --env wins.
+    fn environment_resolution_prefers_the_manifest_default() {
+        // manifest default.
         let dir = project_with(&[
             (MANIFEST_FILE, r#"{ "defaultEnvironment": "stage" }"#),
             ("environments/dev.json", r#"{ "baseUrl": "http://dev" }"#),
@@ -635,13 +672,9 @@ mod tests {
             ),
         ]);
         let project = discover(dir.path(), None).unwrap();
-        let (name, vars) = resolve_environment(&project, Some("dev")).unwrap().unwrap();
-        assert_eq!(name, "dev");
-        assert_eq!(vars["baseUrl"], serde_json::json!("http://dev"));
-
-        // manifest default.
-        let (name, _) = resolve_environment(&project, None).unwrap().unwrap();
+        let (name, vars) = resolve_environment(&project).unwrap().unwrap();
         assert_eq!(name, "stage");
+        assert_eq!(vars["baseUrl"], serde_json::json!("http://stage"));
 
         // the only environment.
         let single = project_with(&[
@@ -649,37 +682,31 @@ mod tests {
             ("environments/only.json", r#"{ "a": 1 }"#),
         ]);
         let project = discover(single.path(), None).unwrap();
-        let (name, vars) = resolve_environment(&project, None).unwrap().unwrap();
+        let (name, vars) = resolve_environment(&project).unwrap().unwrap();
         assert_eq!(name, "only");
         assert_eq!(vars["a"], serde_json::json!(1));
 
         // none at all.
         let none = project_with(&[(MANIFEST_FILE, "{}")]);
         let project = discover(none.path(), None).unwrap();
-        assert_eq!(resolve_environment(&project, None).unwrap(), None);
+        assert_eq!(resolve_environment(&project).unwrap(), None);
 
-        // ambiguous.
+        // ambiguous opens on the `(none)` scope rather than erroring.
         let ambiguous = project_with(&[
             (MANIFEST_FILE, "{}"),
             ("environments/b.json", "{}"),
             ("environments/a.json", "{}"),
         ]);
         let project = discover(ambiguous.path(), None).unwrap();
-        let err = resolve_environment(&project, None).unwrap_err();
-        assert!(
-            err.to_string().contains("multiple environments available"),
-            "{err}"
-        );
-        assert!(err.to_string().contains("a, b"), "{err}");
+        assert_eq!(resolve_environment(&project).unwrap(), None);
 
-        // unknown --env.
-        let project = discover(dir.path(), None).unwrap();
-        let err = resolve_environment(&project, Some("nope")).unwrap_err();
+        // unknown environment names still fail when loaded directly.
+        let err = load_environment(&project, "nope").unwrap_err();
         assert!(
             err.to_string().contains("unknown environment `nope`"),
             "{err}"
         );
-        assert!(err.to_string().contains("dev, stage"), "{err}");
+        assert!(err.to_string().contains("a, b"), "{err}");
     }
 
     #[test]

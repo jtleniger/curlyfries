@@ -14,8 +14,6 @@ pub mod theme;
 pub mod tree;
 pub mod ui;
 
-pub use app::TuiConfig;
-
 /// How long the event loop waits for a key before redrawing.
 const POLL: Duration = Duration::from_millis(50);
 
@@ -23,7 +21,7 @@ const POLL: Duration = Duration::from_millis(50);
 ///
 /// Errors with [`Error::NotATerminal`] when stdin or stdout is not a terminal,
 /// and [`Error::Interactive`] when the terminal cannot be initialised or read.
-pub fn run(config: TuiConfig, project: Project, entries: Vec<Entry>) -> Result<u8, Error> {
+pub fn run(project: Project, entries: Vec<Entry>) -> Result<u8, Error> {
     if !io::stdin().is_terminal() {
         return Err(Error::NotATerminal { stream: "stdin" });
     }
@@ -31,7 +29,7 @@ pub fn run(config: TuiConfig, project: Project, entries: Vec<Entry>) -> Result<u
         return Err(Error::NotATerminal { stream: "stdout" });
     }
 
-    let mut app = app::App::new(config, project, entries)?;
+    let mut app = app::App::new(project, entries)?;
     let mut guard = TerminalGuard::enter()?;
     while !app.should_quit() {
         guard

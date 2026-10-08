@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListState, Paragraph, Tabs, Widget, Wrap};
 
 use crate::render::{self, StatusClass};
-use crate::tui::app::{App, RequestView};
+use crate::tui::app::{App, PendingClear, RequestView};
 use crate::tui::theme::Theme;
 use crate::tui::tree::TreeRow;
 
@@ -16,14 +16,15 @@ use crate::tui::tree::TreeRow;
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// Footer key legend.
-const FOOTER: &str = "↑↓ select · Enter run · e env · Tab body/headers/raw · v definition/resolved · / filter · ? help · q quit";
+const FOOTER: &str = "↑↓ select · Enter run · e env · x clear · Tab body/headers/raw · v definition/resolved · / filter · ? help · q quit";
 
 /// Help overlay contents.
-const HELP: [&str; 14] = [
+const HELP: [&str; 15] = [
     "↑ / k, ↓ / j      move the selection",
     "g / G             first / last request",
     "Enter / r         run the selected request",
     "e                 choose the environment",
+    "x / X             clear captures (scope / every scope, y/n)",
     "/                 filter requests (Esc clears)",
     "Tab / Shift-Tab   next / previous response tab",
     "1 / 2 / 3         Body / Headers / Raw",
@@ -65,15 +66,17 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
     if app.env_picker.is_some() {
         draw_env_picker(app, frame, area, &theme);
     }
+    if app.confirm.is_some() {
+        draw_confirm(app, frame, area, &theme);
+    }
 }
 
-/// One-line header: project, environment, session state and any message.
+/// One-line header: project, environment and any message.
 fn draw_header(app: &App, frame: &mut Frame, area: Rect, theme: &Theme) {
     let text = format!(
-        "curlyfries · {} · env: {} · session: {}",
+        "curlyfries · {} · env: {}",
         app.project.root.display(),
         app.env_name.as_deref().unwrap_or("(none)"),
-        if app.no_session { "off" } else { "on" }
     );
     match app.status_message.as_deref() {
         None => {
@@ -314,12 +317,7 @@ fn draw_captures(app: &App, frame: &mut Frame, area: Rect, theme: &Theme) {
         .title(format!("Captures — {}", app.scope()));
     let captured = app.captured();
     let mut lines: Vec<Line<'static>> = Vec::new();
-    if app.no_session {
-        lines.push(Line::styled(
-            "session disabled (--no-session)",
-            Style::default().fg(theme.dim),
-        ));
-    } else if captured.is_empty() {
+    if captured.is_empty() {
         lines.push(Line::styled(
             "no captured variables",
             Style::default().fg(theme.dim),
@@ -386,6 +384,31 @@ fn draw_env_picker(app: &App, frame: &mut Frame, area: Rect, theme: &Theme) {
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
         popup,
         &mut state,
+    );
+}
+
+/// Centred capture-clear confirmation.
+fn draw_confirm(app: &App, frame: &mut Frame, area: Rect, theme: &Theme) {
+    let popup = centered(50, 30, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent))
+        .title("Clear captures");
+    let message = match app.confirm {
+        Some(PendingClear::All) => {
+            "delete every captured variable in every scope?  y / n".to_string()
+        }
+        _ => format!(
+            "delete every captured variable in scope `{}`?  y / n",
+            app.scope()
+        ),
+    };
+    frame.render_widget(
+        Paragraph::new(message)
+            .wrap(Wrap { trim: false })
+            .block(block),
+        popup,
     );
 }
 
