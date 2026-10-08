@@ -28,6 +28,8 @@ pub struct Runner<'a> {
     pub client: ureq::Agent,
     /// Per-request timeout; `None` disables timeouts.
     pub timeout: Option<Duration>,
+    /// Follow same-origin redirects.
+    pub follow_redirects: bool,
     /// Non-fatal problems, drained by the caller and printed to stderr.
     pub warnings: Vec<String>,
 }
@@ -65,7 +67,19 @@ impl Runner<'_> {
             execute::render_request(&def, &scopes)?
         };
 
-        let response = execute::execute(&self.client, &resolved, self.timeout)?;
+        let response =
+            execute::execute(&self.client, &resolved, self.timeout, self.follow_redirects)?;
+        if response.final_url != resolved.url {
+            self.warnings.push(format!(
+                "warning: followed redirect to {}",
+                response.final_url
+            ));
+        }
+        if let Some(location) = &response.unfollowed_redirect {
+            self.warnings.push(format!(
+                "warning: response is a redirect to {location}, but following redirects is off; set \"followRedirects\": true in curlyfries.json to follow it"
+            ));
+        }
         let (captured, capture_error) = match execute::capture(&def.outputs, &response, &def.file) {
             Ok(captured) => (captured, None),
             Err(error) => (Map::new(), Some(error)),

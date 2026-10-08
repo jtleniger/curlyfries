@@ -679,6 +679,7 @@ impl App {
                 session: &mut session,
                 client: execute::client(timeout),
                 timeout,
+                follow_redirects: project.manifest.follow_redirects,
                 warnings: Vec::new(),
             };
             let outcome = runner.execute_id(&id);

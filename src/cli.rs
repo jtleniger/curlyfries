@@ -133,7 +133,7 @@ where
             let code = if error.use_stderr() { 2 } else { 0 };
             let text = error.render().to_string();
             if error.use_stderr() {
-                let _ = write!(err, "{text}");
+                let _ = write!(err, "{}", render::sanitize_for_terminal(&text));
             } else {
                 let _ = write!(out, "{text}");
             }
@@ -233,6 +233,7 @@ fn build_runner<'a>(
         session,
         client: execute::client(timeout),
         timeout,
+        follow_redirects: project.manifest.follow_redirects,
         warnings: Vec::new(),
     })
 }
@@ -289,7 +290,7 @@ fn run_requests<W: Write, E: Write>(
             .map_err(io_error)?;
         }
         for warning in runner.warnings.drain(..) {
-            writeln!(err, "{warning}").map_err(io_error)?;
+            writeln!(err, "{}", render::sanitize_for_terminal(&warning)).map_err(io_error)?;
         }
         if opts.fail_on_error && outcome.response.status >= 400 {
             return Ok(4);

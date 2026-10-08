@@ -21,7 +21,13 @@ pub const DEFAULT_REQUESTS_DIR: &str = "requests";
 /// Default environments directory.
 pub const DEFAULT_ENVIRONMENTS_DIR: &str = "environments";
 /// Manifest keys, in the order they are listed in errors.
-pub const MANIFEST_KEYS: [&str; 3] = ["requestsDir", "environmentsDir", "defaultEnvironment"];
+pub const MANIFEST_KEYS: [&str; 5] = [
+    "requestsDir",
+    "environmentsDir",
+    "defaultEnvironment",
+    "followRedirects",
+    "followSymlinks",
+];
 
 /// Parsed `curlyfries.json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +38,10 @@ pub struct Manifest {
     pub environments_dir: String,
     /// Environment used when `--env` is absent.
     pub default_environment: Option<String>,
+    /// Follow `3xx` redirects that stay on the same origin.
+    pub follow_redirects: bool,
+    /// Follow symlinks inside the request and environment directories.
+    pub follow_symlinks: bool,
 }
 
 impl Default for Manifest {
@@ -40,6 +50,8 @@ impl Default for Manifest {
             requests_dir: DEFAULT_REQUESTS_DIR.to_string(),
             environments_dir: DEFAULT_ENVIRONMENTS_DIR.to_string(),
             default_environment: None,
+            follow_redirects: false,
+            follow_symlinks: false,
         }
     }
 }
@@ -182,6 +194,22 @@ pub fn load_manifest(path: &Path) -> Result<Manifest, Error> {
                 .to_string(),
         );
     }
+    for (key, slot) in [
+        ("followRedirects", &mut manifest.follow_redirects),
+        ("followSymlinks", &mut manifest.follow_symlinks),
+    ] {
+        if let Some(value) = map.get(key) {
+            match value.as_bool() {
+                Some(flag) => *slot = flag,
+                None => {
+                    return Err(schema(
+                        &format!("/{key}"),
+                        format!("`{key}` must be a boolean"),
+                    ));
+                }
+            }
+        }
+    }
     Ok(manifest)
 }
 
@@ -192,12 +220,12 @@ pub fn collect_requests(project: &Project) -> Result<Vec<Entry>, Error> {
         return Err(Error::MissingDir { path: dir });
     }
     let mut entries = Vec::new();
-    walk(&dir, &dir, &mut entries)?;
+    walk(&dir, &dir, &mut entries, project.manifest.follow_symlinks)?;
     entries.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(entries)
 }
 
-fn walk(root: &Path, dir: &Path, out: &mut Vec<Entry>) -> Result<(), Error> {
+fn walk(root: &Path, dir: &Path, out: &mut Vec<Entry>, follow_symlinks: bool) -> Result<(), Error> {
     let io = |source: std::io::Error| Error::Io {
         path: Some(dir.to_path_buf()),
         source,
@@ -215,10 +243,18 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<Entry>) -> Result<(), Error> {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let metadata = fs::metadata(&path).map_err(io)?;
+        let metadata = fs::symlink_metadata(&path).map_err(io)?;
+        let metadata = if metadata.file_type().is_symlink() {
+            if !follow_symlinks {
+                continue;
+            }
+            fs::metadata(&path).map_err(io)?
+        } else {
+            metadata
+        };
         if metadata.is_dir() {
             if !file_name.starts_with('.') {
-                walk(root, &path, out)?;
+                walk(root, &path, out, follow_symlinks)?;
             }
         } else if metadata.is_file()
             && file_name.ends_with(".json")
@@ -267,7 +303,16 @@ pub fn list_environments(project: &Project) -> Result<Vec<String>, Error> {
         if file_name.starts_with('.') || !file_name.ends_with(".json") {
             continue;
         }
-        if !fs::metadata(&path).map_err(io)?.is_file() {
+        let metadata = fs::symlink_metadata(&path).map_err(io)?;
+        let metadata = if metadata.file_type().is_symlink() {
+            if !project.manifest.follow_symlinks {
+                continue;
+            }
+            fs::metadata(&path).map_err(io)?
+        } else {
+            metadata
+        };
+        if !metadata.is_file() {
             continue;
         }
         let stem = &file_name[..file_name.len() - ".json".len()];
@@ -458,6 +503,72 @@ mod tests {
         let invalid = project_with(&[(MANIFEST_FILE, "{")]);
         let err = load_manifest(&invalid.child(MANIFEST_FILE)).unwrap_err();
         assert!(matches!(err, Error::InvalidJson { .. }), "{err}");
+    }
+
+    #[test]
+    fn manifest_flags_parse_and_default_to_false() {
+        assert!(!Manifest::default().follow_redirects);
+        assert!(!Manifest::default().follow_symlinks);
+
+        let dir = project_with(&[(
+            MANIFEST_FILE,
+            r#"{ "followRedirects": true, "followSymlinks": true }"#,
+        )]);
+        let manifest = load_manifest(&dir.child(MANIFEST_FILE)).unwrap();
+        assert!(manifest.follow_redirects);
+        assert!(manifest.follow_symlinks);
+
+        let bad = project_with(&[(MANIFEST_FILE, r#"{ "followRedirects": "yes" }"#)]);
+        let err = load_manifest(&bad.child(MANIFEST_FILE)).unwrap_err();
+        match err {
+            Error::Schema {
+                pointer, message, ..
+            } => {
+                assert_eq!(pointer, "/followRedirects");
+                assert!(message.contains("must be a boolean"), "{message}");
+            }
+            other => panic!("wrong error: {other}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_skipped_unless_enabled() {
+        let dir = project_with(&[
+            (MANIFEST_FILE, "{}"),
+            ("requests/a.json", "{}"),
+            ("outside/b.json", "{}"),
+            ("env/dev.json", r#"{ "baseUrl": "http://x" }"#),
+        ]);
+        dir.mkdir("environments");
+        std::os::unix::fs::symlink(dir.child("outside"), dir.child("requests/extra"))
+            .expect("symlink is creatable");
+        std::os::unix::fs::symlink(
+            dir.child("env/dev.json"),
+            dir.child("environments/dev.json"),
+        )
+        .expect("symlink is creatable");
+
+        let project = discover(dir.path(), None).unwrap();
+        let ids = |project: &Project| -> Vec<String> {
+            collect_requests(project)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect()
+        };
+        assert_eq!(ids(&project), vec!["a"]);
+        assert!(list_environments(&project).unwrap().is_empty());
+
+        let project = Project {
+            root: project.root,
+            manifest: Manifest {
+                follow_symlinks: true,
+                ..Default::default()
+            },
+        };
+        assert_eq!(ids(&project), vec!["a", "extra/b"]);
+        assert_eq!(list_environments(&project).unwrap(), vec!["dev"]);
     }
 
     #[test]

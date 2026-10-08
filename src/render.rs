@@ -1,5 +1,6 @@
 //! Human and NDJSON rendering of executed requests.
 
+use std::borrow::Cow;
 use std::io::{self, Write};
 
 use serde_json::Value;
@@ -15,6 +16,20 @@ const RESET: &str = "\x1b[0m";
 
 /// How long a captured string may be before it is truncated in human output.
 const CAPTURE_LIMIT: usize = 60;
+
+/// Removes control characters a terminal would interpret as escape sequences,
+/// keeping `\n` and `\t`. Borrows the input when there is nothing to strip.
+pub fn sanitize_for_terminal(text: &str) -> Cow<'_, str> {
+    if !text.chars().any(is_control) {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(text.chars().filter(|c| !is_control(*c)).collect())
+}
+
+/// C0 controls other than `\n` (0x0a) and `\t` (0x09), DEL, and the C1 range.
+fn is_control(c: char) -> bool {
+    matches!(c, '\u{0}'..='\u{8}' | '\u{b}'..='\u{1f}' | '\u{7f}'..='\u{9f}')
+}
 
 /// Rendering switches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -33,17 +48,22 @@ pub fn human(
     captured: &Map,
     opts: RenderOpts,
 ) -> io::Result<()> {
-    writeln!(out, "→ {} {}", req.method, req.url)?;
+    writeln!(out, "→ {} {}", req.method, sanitize_for_terminal(&req.url))?;
     if opts.verbose {
         if !req.headers.is_empty() {
             writeln!(out, "  request headers:")?;
             for (name, value) in &req.headers {
-                writeln!(out, "    {name}: {value}")?;
+                writeln!(
+                    out,
+                    "    {}: {}",
+                    sanitize_for_terminal(name),
+                    sanitize_for_terminal(value)
+                )?;
             }
         }
         if let Some(body) = &req.body {
             writeln!(out, "  request body:")?;
-            writeln!(out, "    {body}")?;
+            writeln!(out, "    {}", sanitize_for_terminal(body))?;
         }
     }
 
@@ -60,9 +80,21 @@ pub fn human(
         write!(out, "{head}")?;
     }
     writeln!(out, "  {}ms", res.duration_ms)?;
+    if !res.final_url.is_empty() && res.final_url != req.url {
+        writeln!(
+            out,
+            "  redirected: {}",
+            sanitize_for_terminal(&res.final_url)
+        )?;
+    }
 
     for (name, value) in &res.headers {
-        writeln!(out, "{name}: {value}")?;
+        writeln!(
+            out,
+            "{}: {}",
+            sanitize_for_terminal(name),
+            sanitize_for_terminal(value)
+        )?;
     }
     writeln!(out)?;
 
@@ -70,8 +102,9 @@ pub fn human(
         match &res.body_json {
             Some(body) => writeln!(out, "{}", pretty(body))?,
             None => {
-                write!(out, "{}", res.body_text)?;
-                if !res.body_text.ends_with('\n') {
+                let text = sanitize_for_terminal(&res.body_text);
+                write!(out, "{text}")?;
+                if !text.ends_with('\n') {
                     writeln!(out)?;
                 }
             }
@@ -82,7 +115,12 @@ pub fn human(
         writeln!(out)?;
         writeln!(out, "captured:")?;
         for (name, value) in captured {
-            writeln!(out, "  {name} = {}", captured_value(value))?;
+            writeln!(
+                out,
+                "  {} = {}",
+                sanitize_for_terminal(name),
+                captured_value(value)
+            )?;
         }
     }
     Ok(())
@@ -95,6 +133,7 @@ pub fn json_line(req: &ResolvedRequest, res: &ExecResult, captured: &Map) -> Val
         "name": req.name,
         "method": req.method,
         "url": req.url,
+        "finalUrl": res.final_url,
         "status": res.status,
         "reason": res.reason,
         "durationMs": res.duration_ms,
@@ -111,23 +150,24 @@ pub fn json_line(req: &ResolvedRequest, res: &ExecResult, captured: &Map) -> Val
 
 /// The list label of a request: `METHOD id`, plus `— name` when it differs.
 pub fn request_label(def: &RequestDef) -> String {
-    if def.name == def.id {
+    let label = if def.name == def.id {
         format!("{} {}", def.method, def.id)
     } else {
         format!("{} {} — {}", def.method, def.id, def.name)
-    }
+    };
+    sanitize_for_terminal(&label).into_owned()
 }
 
 /// The human block for one session scope.
 pub fn scope_line(name: &str, vars: &Map) -> String {
     if vars.is_empty() {
-        return format!("{name}: (no variables)");
+        return sanitize_for_terminal(&format!("{name}: (no variables)")).into_owned();
     }
     let mut out = format!("{name}:");
     for (var, value) in vars {
         out.push_str(&format!("\n  {var} = {}", compact(value)));
     }
-    out
+    sanitize_for_terminal(&out).into_owned()
 }
 
 /// Compact JSON for a value.
@@ -224,6 +264,8 @@ mod tests {
             body_text: body.to_string(),
             body_json: serde_json::from_str(body).ok(),
             duration_ms: 12,
+            final_url: String::new(),
+            unfollowed_redirect: None,
         }
     }
 
@@ -373,6 +415,28 @@ mod tests {
             text.contains("  request body:\n    {\"name\":\"Curlyfries\"}\n"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn sanitize_for_terminal_strips_controls_and_borrows_clean_text() {
+        assert_eq!(sanitize_for_terminal("\u{1b}]52;c;x\u{7}"), "]52;c;x");
+        assert_eq!(sanitize_for_terminal("a\nb\tc\rd"), "a\nb\tcd");
+        assert!(matches!(
+            sanitize_for_terminal("plain text"),
+            Cow::Borrowed("plain text")
+        ));
+    }
+
+    #[test]
+    fn human_output_carries_no_escape_sequences() {
+        let text = render(
+            &resolved("GET", "http://host/x"),
+            &result(200, "OK", "ok\u{1b}]0;X\u{7}\n"),
+            &Map::new(),
+            RenderOpts::default(),
+        );
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(text.contains("ok]0;X\n"), "{text:?}");
     }
 
     #[test]

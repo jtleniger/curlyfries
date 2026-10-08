@@ -159,20 +159,47 @@ curlyfries session clear [--all]
 
 `run --verbose` additionally prints the resolved request headers and body
 (secrets included, since that is the point). `run --json` prints one JSON object
-per request — NDJSON — with `request`, `name`, `method`, `url`, `status`,
-`reason`, `durationMs`, `headers` (wire order), `body` (parsed JSON or `null`),
-`bodyText` (raw text) and `captured`.
+per request — NDJSON — with `request`, `name`, `method`, `url`, `finalUrl`
+(the last hop after any followed redirect), `status`, `reason`, `durationMs`,
+`headers` (wire order), `body` (parsed JSON or `null`), `bodyText` (raw text)
+and `captured`.
 
 Human output colours the status line green/yellow/red for 2xx/4xx/5xx when
 stdout is a terminal and `NO_COLOR` is unset; captured strings longer than 60
-characters are truncated with `…`.
+characters are truncated with `…`. Control characters in a response body are
+stripped before it is printed (only `\n` and `\t` survive), so a hostile server
+cannot drive the terminal through escape or OSC sequences; `--json` escapes
+them instead.
+
+## Redirects and symlinks
+
+Both are off by default, so neither a hostile server nor a hostile checkout can
+steer the client on its own. Set them in `curlyfries.json`:
+
+```json
+{ "followRedirects": true, "followSymlinks": true }
+```
+
+- `followRedirects` follows `3xx` redirects that stay on the **same origin** —
+  identical scheme, host and port, with default ports normalised — for at most
+  10 hops. Anything else (another host, another port, an https→http downgrade)
+  fails with `error: redirect error in <url>`, so request headers never reach
+  another origin.
+- With redirects off, a `3xx` is reported as the response and stderr carries
+  `warning: response is a redirect to <location>, but following redirects is
+  off; …` — the `Location` is never fetched.
+- `followSymlinks` restores following symlinks inside `requestsDir` and
+  `environmentsDir`; by default symlinked entries are skipped, so the walk
+  cannot read files outside the project.
+- Plain http keeps working either way: the policy compares scheme, host and
+  port rather than requiring TLS.
 
 ## Exit codes
 
 | code | meaning |
 |---|---|
 | `0` | a response was received (or interactive mode exited cleanly) |
-| `1` | filesystem or environment: project not found, missing requests directory, IO, transport, timeout, not a terminal, unreadable session file |
+| `1` | filesystem or environment: project not found, missing requests directory, IO, transport, timeout, refused redirect, not a terminal, unreadable session file |
 | `2` | CLI usage error (from the argument parser) |
 | `3` | project or request definition: invalid JSON, schema violation, template error, undefined variable, output evaluation, unknown request id |
 | `4` | a status of `400` or above with `--fail-on-error` |

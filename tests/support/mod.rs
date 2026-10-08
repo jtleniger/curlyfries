@@ -383,6 +383,7 @@ pub fn runner<'a>(
         session,
         client: curlyfries::execute::client(timeout),
         timeout,
+        follow_redirects: false,
         warnings: Vec::new(),
     }
 }

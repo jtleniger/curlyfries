@@ -32,6 +32,7 @@ fn send(
     env: &Map,
     overrides: &Map,
     timeout: Option<Duration>,
+    follow_redirects: bool,
 ) -> Result<ExecResult, Error> {
     let session = Map::new();
     let scopes = Scopes {
@@ -41,7 +42,12 @@ fn send(
         overrides,
     };
     let resolved = execute::render_request(def, &scopes)?;
-    execute::execute(&execute::client(timeout), &resolved, timeout)
+    execute::execute(
+        &execute::client(timeout),
+        &resolved,
+        timeout,
+        follow_redirects,
+    )
 }
 
 #[test]
@@ -53,7 +59,7 @@ fn base_url_join_preserves_the_query_string() {
         "ships/list",
         json!({ "method": "GET", "path": "/ships?limit=2&sort=-launchedYear" }),
     );
-    let result = send(&request, &env, &empty, None).unwrap();
+    let result = send(&request, &env, &empty, None, false).unwrap();
     assert_eq!(result.status, 200);
     let received = server.finish();
     assert_eq!(received.len(), 1);
@@ -67,7 +73,7 @@ fn absolute_paths_bypass_the_base_url() {
     let env = map(&[("baseUrl", json!("http://127.0.0.1:9"))]);
     let empty = Map::new();
     let request = def("x", json!({ "method": "GET", "path": absolute }));
-    let result = send(&request, &env, &empty, None).unwrap();
+    let result = send(&request, &env, &empty, None, false).unwrap();
     assert_eq!(result.status, 200);
     assert_eq!(server.finish()[0].target, "/direct");
 }
@@ -77,7 +83,7 @@ fn missing_base_url_fails_before_sending() {
     let env = map(&[("limit", json!(2))]);
     let empty = Map::new();
     let request = def("ships/list", json!({ "method": "GET", "path": "/ships" }));
-    let error = send(&request, &env, &empty, None).unwrap_err();
+    let error = send(&request, &env, &empty, None, false).unwrap_err();
     assert!(matches!(error, Error::MissingBaseUrl { .. }), "{error}");
     assert_eq!(error.exit_code(), 3);
 }
@@ -100,7 +106,7 @@ fn post_sends_typed_json_and_a_default_content_type() {
             "body": { "name": "${shipName}", "crewCapacity": "${capacity}" }
         }),
     );
-    let result = send(&request, &env, &empty, None).unwrap();
+    let result = send(&request, &env, &empty, None, false).unwrap();
     assert_eq!(result.status, 201);
     assert_eq!(result.body_json, Some(json!({ "id": 6 })));
 
@@ -130,7 +136,7 @@ fn user_supplied_content_type_and_user_agent_win() {
             "body": "hello"
         }),
     );
-    send(&request, &env, &empty, None).unwrap();
+    send(&request, &env, &empty, None, false).unwrap();
     let received = server.finish();
     assert_eq!(received[0].header("content-type"), Some("text/plain"));
     assert_eq!(received[0].header("user-agent"), Some("custom/9"));
@@ -143,7 +149,7 @@ fn get_without_a_body_sends_no_bytes() {
     let env = map(&[("baseUrl", json!(server.base_url))]);
     let empty = Map::new();
     let request = def("x", json!({ "method": "GET", "path": "/x" }));
-    let result = send(&request, &env, &empty, None).unwrap();
+    let result = send(&request, &env, &empty, None, false).unwrap();
     assert_eq!(result.status, 204);
     assert_eq!(result.body_text, "");
     assert_eq!(result.body_json, None);
@@ -165,7 +171,7 @@ fn headers_and_status_come_back_in_wire_order() {
     let env = map(&[("baseUrl", json!(server.base_url))]);
     let empty = Map::new();
     let request = def("ships/list", json!({ "method": "GET", "path": "/ships" }));
-    let result = send(&request, &env, &empty, None).unwrap();
+    let result = send(&request, &env, &empty, None, false).unwrap();
     assert_eq!(result.status, 200);
     assert_eq!(result.reason, "OK");
     // ureq's http stack normalises header names to lower case, so the recorded
@@ -203,7 +209,7 @@ fn non_json_bodies_keep_their_text() {
     let env = map(&[("baseUrl", json!(server.base_url))]);
     let empty = Map::new();
     let request = def("x", json!({ "method": "GET", "path": "/x" }));
-    let result = send(&request, &env, &empty, None).unwrap();
+    let result = send(&request, &env, &empty, None, false).unwrap();
     assert_eq!(result.body_json, None);
     assert_eq!(result.body_text, "not json at all");
     let _ = server.finish();
@@ -224,7 +230,7 @@ fn error_statuses_are_normal_results() {
         "ships/missing",
         json!({ "method": "GET", "path": "/ships/9999" }),
     );
-    let result = send(&request, &env, &empty, None).unwrap();
+    let result = send(&request, &env, &empty, None, false).unwrap();
     assert_eq!(result.status, 404);
     assert_eq!(result.reason, "Not Found");
     assert_eq!(
@@ -235,23 +241,97 @@ fn error_statuses_are_normal_results() {
 }
 
 #[test]
-fn redirects_are_followed() {
-    let server = StubServer::start(|base_url| {
+fn redirects_are_not_followed_unless_enabled() {
+    let off = StubServer::start(|base_url| {
         vec![
             support::StubResponse::new(302, "Found")
                 .header("Location", &format!("{base_url}/second")),
             support::StubResponse::json(200, "OK", r#"{"moved":true}"#),
         ]
     });
-    let env = map(&[("baseUrl", json!(server.base_url))]);
+    let off_url = off.base_url.clone();
+    let env = map(&[("baseUrl", json!(off_url.clone()))]);
     let empty = Map::new();
     let request = def("x", json!({ "method": "GET", "path": "/start" }));
-    let result = send(&request, &env, &empty, None).unwrap();
+    let result = send(&request, &env, &empty, None, false).unwrap();
+    assert_eq!(result.status, 302);
+    assert_eq!(
+        result.unfollowed_redirect.as_deref(),
+        Some(format!("{off_url}/second").as_str())
+    );
+    assert_eq!(result.final_url, format!("{off_url}/start"));
+    let targets: Vec<String> = off.finish().into_iter().map(|r| r.target).collect();
+    assert_eq!(targets, vec!["/start"]);
+
+    let on = StubServer::start(|base_url| {
+        vec![
+            support::StubResponse::new(302, "Found")
+                .header("Location", &format!("{base_url}/second")),
+            support::StubResponse::json(200, "OK", r#"{"moved":true}"#),
+        ]
+    });
+    let on_url = on.base_url.clone();
+    let env = map(&[("baseUrl", json!(on_url.clone()))]);
+    let result = send(&request, &env, &empty, None, true).unwrap();
     assert_eq!(result.status, 200);
     assert_eq!(result.body_json, Some(json!({ "moved": true })));
-    let received = server.finish();
-    let targets: Vec<&str> = received.iter().map(|r| r.target.as_str()).collect();
+    assert_eq!(result.final_url, format!("{on_url}/second"));
+    assert_eq!(result.unfollowed_redirect, None);
+    let targets: Vec<String> = on.finish().into_iter().map(|r| r.target).collect();
     assert_eq!(targets, vec!["/start", "/second"]);
+}
+
+#[test]
+fn same_origin_redirects_carry_the_request_headers() {
+    let server = StubServer::start(|base_url| {
+        vec![
+            support::StubResponse::new(302, "Found")
+                .header("Location", &format!("{base_url}/second")),
+            support::StubResponse::json(200, "OK", "{}"),
+        ]
+    });
+    let env = map(&[("baseUrl", json!(server.base_url))]);
+    let empty = Map::new();
+    let request = def(
+        "x",
+        json!({
+            "method": "GET",
+            "path": "/start",
+            "headers": { "Authorization": "Bearer x" }
+        }),
+    );
+    let result = send(&request, &env, &empty, None, true).unwrap();
+    assert_eq!(result.status, 200);
+    let received = server.finish();
+    assert_eq!(received.len(), 2);
+    assert_eq!(received[1].header("authorization"), Some("Bearer x"));
+}
+
+#[test]
+fn cross_origin_redirect_is_refused_and_leaks_nothing() {
+    let victim = StubServer::start(|_| vec![support::StubResponse::json(200, "OK", "{}")]);
+    let victim_url = victim.base_url.clone();
+    let attacker = StubServer::start(move |_| {
+        vec![
+            support::StubResponse::new(302, "Found")
+                .header("Location", &format!("{victim_url}/steal")),
+        ]
+    });
+    let env = map(&[("baseUrl", json!(attacker.base_url))]);
+    let empty = Map::new();
+    let request = def(
+        "x",
+        json!({
+            "method": "GET",
+            "path": "/start",
+            "headers": { "Authorization": "Bearer x" }
+        }),
+    );
+    let error = send(&request, &env, &empty, None, true).unwrap_err();
+    assert!(matches!(error, Error::Redirect { .. }), "{error}");
+    assert_eq!(error.exit_code(), 1);
+    let _ = attacker.finish();
+    assert_eq!(victim.request_count(), 0);
 }
 
 #[test]
@@ -263,7 +343,7 @@ fn slow_responses_hit_the_timeout() {
         "x",
         json!({ "method": "GET", "path": "/_debug/slow?ms=3000" }),
     );
-    let error = send(&request, &env, &empty, Some(Duration::from_secs(1))).unwrap_err();
+    let error = send(&request, &env, &empty, Some(Duration::from_secs(1)), false).unwrap_err();
     match error {
         Error::Timeout { seconds, url } => {
             assert_eq!(seconds, 1);
@@ -283,7 +363,7 @@ fn refused_connections_are_transport_errors() {
     let env = map(&[("baseUrl", json!(format!("http://{address}")))]);
     let empty = Map::new();
     let request = def("x", json!({ "method": "GET", "path": "/nope" }));
-    let error = send(&request, &env, &empty, Some(Duration::from_secs(5))).unwrap_err();
+    let error = send(&request, &env, &empty, Some(Duration::from_secs(5)), false).unwrap_err();
     let text = error.to_string();
     assert!(text.starts_with("error: transport error:"), "{text}");
     assert!(
@@ -325,7 +405,7 @@ fn captures_cover_nested_paths_status_and_headers() {
         overrides: &empty,
     };
     let resolved = execute::render_request(&request, &scopes).unwrap();
-    let result = execute::execute(&execute::client(None), &resolved, None).unwrap();
+    let result = execute::execute(&execute::client(None), &resolved, None, false).unwrap();
     let captured = execute::capture(&request.outputs, &result, &request.file).unwrap();
     assert_eq!(captured["firstPirateName"], json!("Mad Meg Hawkins"));
     assert_eq!(captured["shipCount"], json!("5"));
@@ -355,7 +435,7 @@ fn failed_captures_store_nothing() {
         overrides: &empty,
     };
     let resolved = execute::render_request(&request, &scopes).unwrap();
-    let result = execute::execute(&execute::client(None), &resolved, None).unwrap();
+    let result = execute::execute(&execute::client(None), &resolved, None, false).unwrap();
     let error = execute::capture(&request.outputs, &result, &request.file).unwrap_err();
     assert!(matches!(error, Error::Output { .. }), "{error}");
     // The caller's map is untouched: nothing was captured.

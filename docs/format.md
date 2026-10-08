@@ -14,6 +14,8 @@ listed here:
 | `requestsDir` | string | `"requests"` | directory scanned for request files, relative to the root |
 | `environmentsDir` | string | `"environments"` | directory holding environment files, relative to the root |
 | `defaultEnvironment` | string | none | environment used when `--env` is absent |
+| `followRedirects` | boolean | `false` | follow same-origin `3xx` redirects |
+| `followSymlinks` | boolean | `false` | follow symlinks in the request and environment directories |
 
 Unknown keys, wrong types and non-object documents are errors
 (`error: invalid request file <path>` / `at: <pointer>` / `reason: …`).
@@ -21,7 +23,8 @@ Unknown keys, wrong types and non-object documents are errors
 ## Request files
 
 Every `*.json` file under `requestsDir` is one request. Directories whose name
-starts with `.` are skipped, as are files that do not end in `.json`. The
+starts with `.` are skipped, as are files that do not end in `.json`, and
+symlinked entries are skipped unless `followSymlinks` is `true`. The
 request **id** is the path relative to `requestsDir` with the `.json` suffix
 removed, using `/` separators: `requests/ships/create.json` is `ships/create`.
 Ids are listed in sorted order, and `run` accepts an id with or without its
@@ -281,17 +284,21 @@ error: unreadable session file .curlyfries/session.json
 ## Response rendering details
 
 - **Human output** prints `→ METHOD URL`, then `← <status> <reason>  <ms>`, then
-  the response headers in wire order, then the body (pretty-printed when it is
-  JSON, raw otherwise). The `captured:` block is printed only when something was
-  captured, with each value as compact JSON and strings longer than 60
-  characters truncated with `…`.
+  a `redirected: <url>` line when a redirect was followed, then the response
+  headers in wire order, then the body (pretty-printed when it is JSON, raw
+  otherwise). Control characters other than `\n` and `\t` are stripped from
+  every attacker-influenced part (URL, headers, body, captured names) before it
+  reaches the terminal, so escape and OSC sequences cannot drive it. The
+  `captured:` block is printed only when something was captured, with each value
+  as compact JSON and strings longer than 60 characters truncated with `…`.
 - **Header names** are lower-cased by the HTTP stack; values and their order are
   exactly as received. JSON output therefore contains names such as
   `content-type`, and `x-total-count`.
 - **`run --json`** prints NDJSON: one object per request with `request`, `name`,
-  `method`, `url`, `status`, `reason`, `durationMs`, `headers`
-  (`[{"name","value"}]`), `body` (parsed JSON or `null`), `bodyText` and
-  `captured`.
+  `method`, `url`, `finalUrl` (the last hop after any followed redirect),
+  `status`, `reason`, `durationMs`, `headers` (`[{"name","value"}]`), `body`
+  (parsed JSON or `null`), `bodyText` and `captured`. `serde_json` escapes
+  control characters, so `--json` output is safe to pipe.
 - **Body size**: responses are read through the HTTP library's default limit;
   curlyfries does not raise it.
 
@@ -300,7 +307,7 @@ error: unreadable session file .curlyfries/session.json
 | code | meaning |
 |---|---|
 | `0` | a response was received (or interactive mode exited cleanly) |
-| `1` | filesystem or environment: project not found, missing requests directory, IO, transport, timeout, not a terminal, unreadable session file |
+| `1` | filesystem or environment: project not found, missing requests directory, IO, transport, timeout, refused redirect, not a terminal, unreadable session file |
 | `2` | CLI usage error |
 | `3` | project or request definition: invalid JSON, schema violation, template error, undefined variable, output evaluation, unknown request id |
 | `4` | status `>= 400` with `--fail-on-error` |

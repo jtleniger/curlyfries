@@ -624,3 +624,111 @@ fn verbose_shows_the_resolved_request() {
     assert!(text.contains("Content-Type: application/json"), "{text}");
     let _ = server.finish();
 }
+
+#[test]
+fn response_body_escapes_are_stripped() {
+    let server = StubServer::start(|_| {
+        vec![
+            StubResponse::new(200, "OK")
+                .header("Content-Type", "text/plain")
+                .body("ok\u{1b}]52;c;cHdk\u{7}\n"),
+        ]
+    });
+    let dir = project_fixture(
+        "cli-escape-body",
+        &server,
+        &[("requests/data.json", r#"{"method":"GET","path":"/data"}"#)],
+    );
+    let output = run_binary(dir.path(), &["run", "data"]);
+    assert_eq!(exit_code(&output), 0, "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("ok"), "{text:?}");
+    assert!(!text.contains('\u{1b}'), "{text:?}");
+    assert!(!text.contains('\u{7}'), "{text:?}");
+    let _ = server.finish();
+}
+
+#[test]
+fn output_error_keys_are_escaped() {
+    let server = StubServer::start(|_| {
+        vec![StubResponse::json(
+            200,
+            "OK",
+            "{\"\\u001b]52;c;a2V5\\u0007\":1,\"ok\":true}",
+        )]
+    });
+    let dir = project_fixture(
+        "cli-escape-output",
+        &server,
+        &[(
+            "requests/data.json",
+            r#"{
+              "method": "GET",
+              "path": "/data",
+              "outputs": [ { "missing": "response.body.nope" } ]
+            }"#,
+        )],
+    );
+    let output = run_binary(dir.path(), &["run", "data"]);
+    assert_eq!(exit_code(&output), 3);
+    let text = stderr(&output);
+    assert!(text.contains("no key `nope`"), "{text:?}");
+    assert!(!text.contains('\u{1b}'), "{text:?}");
+    assert!(!text.contains('\u{7}'), "{text:?}");
+    let _ = server.finish();
+}
+
+#[test]
+fn redirects_are_not_followed_by_default() {
+    let server = StubServer::start(|base_url| {
+        vec![
+            StubResponse::new(302, "Found").header("Location", &format!("{base_url}/second")),
+            StubResponse::json(200, "OK", "{}"),
+        ]
+    });
+    let dir = project_fixture(
+        "cli-redirect-off",
+        &server,
+        &[("requests/start.json", r#"{"method":"GET","path":"/start"}"#)],
+    );
+    let output = run_binary(dir.path(), &["run", "start"]);
+    assert_eq!(exit_code(&output), 0, "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("← 302 Found"),
+        "{}",
+        stdout(&output)
+    );
+    let text = stderr(&output);
+    assert!(
+        text.contains("warning: response is a redirect to"),
+        "{text:?}"
+    );
+    assert_eq!(server.request_count(), 1);
+    let _ = server.finish();
+}
+
+#[test]
+fn follow_redirects_follows_same_origin() {
+    let server = StubServer::start(|base_url| {
+        vec![
+            StubResponse::new(302, "Found").header("Location", &format!("{base_url}/second")),
+            StubResponse::json(200, "OK", "{}"),
+        ]
+    });
+    let dir = project_fixture(
+        "cli-redirect-on",
+        &server,
+        &[("requests/start.json", r#"{"method":"GET","path":"/start"}"#)],
+    );
+    dir.write(
+        "curlyfries.json",
+        r#"{ "defaultEnvironment": "dev", "followRedirects": true }"#,
+    );
+    let output = run_binary(dir.path(), &["run", "start"]);
+    assert_eq!(exit_code(&output), 0, "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("← 200 OK"), "{text}");
+    assert!(text.contains("redirected:"), "{text}");
+    assert_eq!(server.request_count(), 2);
+    let _ = server.finish();
+}

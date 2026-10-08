@@ -172,6 +172,14 @@ pub enum Error {
         /// Configured timeout in seconds.
         seconds: u64,
     },
+    /// A redirect could not be followed.
+    #[error("error: redirect error in {url}\n  reason: {message}")]
+    Redirect {
+        /// URL the redirect was received from.
+        url: String,
+        /// Why it was refused.
+        message: String,
+    },
     /// `.curlyfries/session.json` could not be read or understood.
     #[error("error: unreadable session file {path}\n  reason: {reason}{hint}", path = path.display(), hint = session_hint(hint))]
     SessionFile {
@@ -211,6 +219,7 @@ impl Error {
             | Error::NoRequests { .. }
             | Error::Transport { .. }
             | Error::Timeout { .. }
+            | Error::Redirect { .. }
             | Error::SessionFile { .. }
             | Error::NotATerminal { .. }
             | Error::Interactive { .. } => 1,
