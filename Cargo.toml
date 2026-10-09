@@ -1,6 +1,6 @@
 [package]
 name = "curlyfries"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "Filesystem-driven CLI API client: requests as JSON files, environments as JSON, captures persisted in a session file"
@@ -13,6 +13,7 @@ rand = "0.9"
 ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+serde_yaml_ng = "0.10"
 thiserror = "2"
 ureq = "3"
 

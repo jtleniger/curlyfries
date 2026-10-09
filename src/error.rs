@@ -76,6 +76,32 @@ pub enum Error {
         /// Requests directory that was searched.
         dir: PathBuf,
     },
+    /// `curlyfries init` would overwrite files that already exist.
+    #[error("error: cannot initialize a curlyfries project in {root}\n  existing: {existing}\n  hint: remove these files, or run init in an empty directory", root = root.display(), existing = join_or_none(existing))]
+    InitConflict {
+        /// Directory `init` was asked to fill.
+        root: PathBuf,
+        /// Existing target files, relative to `root`, in check order.
+        existing: Vec<String>,
+    },
+    /// `curlyfries import` would overwrite files that already exist.
+    #[error("error: cannot import into {root}: these files already exist\n  existing: {existing}\n  hint: remove these files, or import into an empty directory", root = root.display(), existing = join_or_none(existing))]
+    ImportConflict {
+        /// Directory `import` was asked to fill.
+        root: PathBuf,
+        /// Existing target files, relative to `root`, in check order.
+        existing: Vec<String>,
+    },
+    /// The API document could not be read, parsed or understood.
+    #[error("error: invalid API document {path}\n  at:    {pointer}\n  reason: {message}", path = path.display())]
+    InvalidSpec {
+        /// Document that failed.
+        path: PathBuf,
+        /// JSON pointer of the offending value (empty for the document root).
+        pointer: String,
+        /// What is wrong.
+        message: String,
+    },
     /// A JSON document could not be parsed.
     #[error("error: invalid JSON in {path}\n  reason: {source}", path = path.display())]
     InvalidJson {
@@ -137,7 +163,7 @@ pub enum Error {
         reason: String,
     },
     /// A relative request path could not be joined to a base URL.
-    #[error("error: no base URL for request `{request_id}`\n  path: {resolved}\n  hint: add \"baseUrl\" to {env_file}, or pass --var baseUrl=http://host:port, or use an absolute URL", resolved = json_string(resolved), env_file = env_file_name(env))]
+    #[error("error: no base URL for request `{request_id}`\n  path: {resolved}\n  hint: add \"baseUrl\" to {env_file}, or use an absolute URL", resolved = json_string(resolved), env_file = env_file_name(env))]
     MissingBaseUrl {
         /// Request id.
         request_id: String,
@@ -172,6 +198,14 @@ pub enum Error {
         /// Configured timeout in seconds.
         seconds: u64,
     },
+    /// A redirect could not be followed.
+    #[error("error: redirect error in {url}\n  reason: {message}")]
+    Redirect {
+        /// URL the redirect was received from.
+        url: String,
+        /// Why it was refused.
+        message: String,
+    },
     /// `.curlyfries/session.json` could not be read or understood.
     #[error("error: unreadable session file {path}\n  reason: {reason}{hint}", path = path.display(), hint = session_hint(hint))]
     SessionFile {
@@ -179,13 +213,11 @@ pub enum Error {
         path: PathBuf,
         /// What is wrong with it.
         reason: String,
-        /// Whether to suggest `session clear --all`.
+        /// Whether to suggest clearing the captures.
         hint: bool,
     },
-    /// Interactive mode was requested without a terminal.
-    #[error(
-        "error: interactive mode requires a terminal; use `curlyfries run <id>`\n  not a terminal: {stream}"
-    )]
+    /// The UI was requested without a terminal.
+    #[error("error: curlyfries needs a terminal\n  not a terminal: {stream}")]
     NotATerminal {
         /// Which standard stream is not a terminal.
         stream: &'static str,
@@ -202,19 +234,23 @@ impl Error {
     /// Process exit code for this failure.
     ///
     /// `1` filesystem/environment, `3` project/request definition. Usage errors
-    /// (exit `2`) come from the argument parser, `4` from `--fail-on-error`.
+    /// (exit `2`) come from the argument parser.
     pub fn exit_code(&self) -> u8 {
         match self {
             Error::Io { .. }
             | Error::ProjectNotFound { .. }
             | Error::MissingDir { .. }
             | Error::NoRequests { .. }
+            | Error::InitConflict { .. }
+            | Error::ImportConflict { .. }
             | Error::Transport { .. }
             | Error::Timeout { .. }
+            | Error::Redirect { .. }
             | Error::SessionFile { .. }
             | Error::NotATerminal { .. }
             | Error::Interactive { .. } => 1,
             Error::InvalidJson { .. }
+            | Error::InvalidSpec { .. }
             | Error::Schema { .. }
             | Error::Template { .. }
             | Error::UndefinedVariable { .. }
@@ -241,6 +277,15 @@ impl Error {
             Error::InvalidJson { path, source } => Error::InvalidJson {
                 path: short(path),
                 source,
+            },
+            Error::InvalidSpec {
+                path,
+                pointer,
+                message,
+            } => Error::InvalidSpec {
+                path: short(path),
+                pointer,
+                message,
             },
             Error::Schema {
                 path,
@@ -339,7 +384,8 @@ fn env_file_name(env: &Option<String>) -> String {
 
 fn session_hint(hint: &bool) -> String {
     if *hint {
-        "\n  hint:  delete the file or run `curlyfries session clear --all`".to_string()
+        "\n  hint:  delete the file, or press x in the terminal UI to clear the captures"
+            .to_string()
     } else {
         String::new()
     }
@@ -413,6 +459,39 @@ mod tests {
     }
 
     #[test]
+    fn import_errors_render_and_exit() {
+        let conflict = Error::ImportConflict {
+            root: PathBuf::from("/tmp/imported"),
+            existing: vec![
+                "curlyfries.json".to_string(),
+                "requests/ships/list.json".to_string(),
+            ],
+        };
+        assert_eq!(conflict.exit_code(), 1);
+        let text = conflict.to_string();
+        assert!(
+            text.starts_with("error: cannot import into /tmp/imported: these files already exist"),
+            "{text}"
+        );
+        assert!(
+            text.contains("existing: curlyfries.json, requests/ships/list.json"),
+            "{text}"
+        );
+        assert!(text.contains("import into an empty directory"), "{text}");
+
+        let spec = Error::InvalidSpec {
+            path: PathBuf::from("spec.json"),
+            pointer: "/openapi".to_string(),
+            message: "unsupported `openapi` version `2.0` (expected 3.x)".to_string(),
+        };
+        assert_eq!(spec.exit_code(), 3);
+        assert_eq!(
+            spec.to_string(),
+            "error: invalid API document spec.json\n  at:    /openapi\n  reason: unsupported `openapi` version `2.0` (expected 3.x)"
+        );
+    }
+
+    #[test]
     fn session_hint_is_optional() {
         let hinted = Error::SessionFile {
             path: PathBuf::from(".curlyfries/session.json"),
@@ -428,7 +507,7 @@ mod tests {
             text.contains("unsupported version 2 (expected 1)"),
             "{text}"
         );
-        assert!(text.contains("session clear --all"), "{text}");
+        assert!(text.contains("press x"), "{text}");
         let plain = Error::SessionFile {
             path: PathBuf::from("s.json"),
             reason: "boom".to_string(),

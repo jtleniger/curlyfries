@@ -13,7 +13,10 @@ listed here:
 |---|---|---|---|
 | `requestsDir` | string | `"requests"` | directory scanned for request files, relative to the root |
 | `environmentsDir` | string | `"environments"` | directory holding environment files, relative to the root |
-| `defaultEnvironment` | string | none | environment used when `--env` is absent |
+| `defaultEnvironment` | string | none | environment the UI opens on |
+| `followRedirects` | boolean | `false` | follow same-origin `3xx` redirects |
+| `followSymlinks` | boolean | `false` | follow symlinks in the request and environment directories |
+| `timeout` | number | `30` | per-request timeout in seconds; `0` disables timeouts |
 
 Unknown keys, wrong types and non-object documents are errors
 (`error: invalid request file <path>` / `at: <pointer>` / `reason: …`).
@@ -21,11 +24,11 @@ Unknown keys, wrong types and non-object documents are errors
 ## Request files
 
 Every `*.json` file under `requestsDir` is one request. Directories whose name
-starts with `.` are skipped, as are files that do not end in `.json`. The
+starts with `.` are skipped, as are files that do not end in `.json`, and
+symlinked entries are skipped unless `followSymlinks` is `true`. The
 request **id** is the path relative to `requestsDir` with the `.json` suffix
 removed, using `/` separators: `requests/ships/create.json` is `ships/create`.
-Ids are listed in sorted order, and `run` accepts an id with or without its
-`.json` suffix.
+Ids are listed in sorted order.
 
 ```json
 {
@@ -78,8 +81,8 @@ Delimiter: `${name}`. Variable names match `[A-Za-z_][A-Za-z0-9_.-]*`
 | `}` on its own | a literal `}` |
 | `${x}}` | the value of `x`, then a literal `}` |
 
-Parse failures are reported when a request file is loaded — `list` finds them
-without sending anything:
+Parse failures are reported when a request file is loaded — the UI loads every
+request at startup:
 
 | situation | message |
 |---|---|
@@ -123,8 +126,8 @@ or header name that renders to `""` is an error.
 ### Random values
 
 A placeholder whose name starts with `random.` is a built-in, not a variable.
-The built-ins are consulted only when `--var`, the session store and the
-environment all miss, so any of those can shadow one to pin a value:
+The built-ins are consulted only when the session store and the environment
+both miss, so either can shadow one to pin a value:
 
 | placeholder | value |
 |---|---|
@@ -144,11 +147,6 @@ a message naming the placeholder — for example
 `` invalid random value `random.int.9.2`: minimum 9 is greater than maximum 2 ``.
 A name outside the namespace is an ordinary variable and still fails as
 `undefined variable` when nothing defines it.
-
-```bash
-curlyfries run ships/create                                    # a fresh ship every run
-curlyfries run ships/create --var random.string.8=fixed --var random.int.1.500=42  # reproducible
-```
 
 Template syntax is validated when a request is loaded, but variables are looked
 up when the request runs, so `${token}` is legal in a file that no environment
@@ -188,7 +186,8 @@ Evaluation rules and their failures:
 
 Expression *syntax* is validated at load time; *evaluation* happens after the
 response arrives. A failed output means the whole capture is refused: no
-variable from that request is stored, and the run exits `3`.
+variable from that request is stored, and the UI shows the failure in its own
+**Output error** section.
 
 ## Environments
 
@@ -206,25 +205,22 @@ naming the file. Files that are not `*.json` and dot-files are ignored.
 
 The document must be a JSON object; every entry becomes a variable and may hold
 any JSON type. Values are **literal**: environment files are never templated, so
-resolution stays one pass with no cycles. A derived value belongs in a request,
-in `--var`, or written out by hand.
+resolution stays one pass with no cycles. A derived value belongs in the
+environment file, in a request, or in a capture.
 
 Which environment is used:
 
-1. `--env <name>` if given (unknown name → error listing the available ones);
-2. otherwise `defaultEnvironment` from the manifest;
-3. otherwise the only environment file, if exactly one exists;
-4. otherwise none (`environmentsDir` missing or empty);
-5. otherwise — several candidates and no explicit choice — an error listing the
-   available names.
+1. `defaultEnvironment` from the manifest;
+2. otherwise the only environment file, if exactly one exists;
+3. otherwise none — a missing or empty `environmentsDir`, or several candidates
+   with no default. The UI then opens on the `(none)` scope and `e` picks one.
 
 ## Variable lookup
 
 | priority | scope | written by |
 |---|---|---|
-| 1 | `--var NAME=VALUE` overrides | the command line (explicit input always wins) |
-| 2 | session store: persisted captures plus captures from this invocation | `outputs` |
-| 3 | selected environment | `environments/<name>.json` |
+| 1 | session store: persisted captures plus captures from this invocation | `outputs` |
+| 2 | selected environment | `environments/<name>.json` |
 
 A miss in every scope is `error: undefined variable `<name>` in <file>` with the
 `at:` pointer, the `value:` string and the known names per scope:
@@ -236,9 +232,6 @@ error: undefined variable `token` in requests/auth/me.json
   known: environment `dev` → admiral, baseUrl, limit, pirate
          session           → (none)
 ```
-
-`--var` values are parsed as JSON when they parse (`--var limit=7` becomes the
-number `7`) and taken as strings otherwise (`--var q=seven`).
 
 ## Session file
 
@@ -259,13 +252,13 @@ Captured variables are persisted in `<root>/.curlyfries/session.json`:
   in an environment name.
 - `version` must be `1`, `updatedAtUnix` is a Unix epoch second and every
   `varScopes` value must be an object. Unknown keys, an unknown version and
-  malformed values are errors — never silent discards — that suggest
-  `curlyfries session clear --all`:
+  malformed values are errors — never silent discards — that suggest clearing
+  the captures from the UI:
 
 ```
 error: unreadable session file .curlyfries/session.json
   reason: unsupported version 2 (expected 1)
-  hint:  delete the file or run `curlyfries session clear --all`
+  hint:  delete the file, or press x in the terminal UI to clear the captures
 ```
 
 - On start, the active scope's persisted variables seed the session store. After
@@ -273,37 +266,17 @@ error: unreadable session file .curlyfries/session.json
   into the scope and the file is rewritten atomically (temp file + rename).
 - A write failure prints `warning: could not write session file <path>: <reason>`
   on stderr and leaves the exit code alone.
-- `--no-session` neither reads nor writes the file.
-- `session show` prints the active scope; `session clear` removes it and
-  `session clear --all` removes every scope. A missing file is an empty store,
-  not an error.
-
-## Response rendering details
-
-- **Human output** prints `→ METHOD URL`, then `← <status> <reason>  <ms>`, then
-  the response headers in wire order, then the body (pretty-printed when it is
-  JSON, raw otherwise). The `captured:` block is printed only when something was
-  captured, with each value as compact JSON and strings longer than 60
-  characters truncated with `…`.
-- **Header names** are lower-cased by the HTTP stack; values and their order are
-  exactly as received. JSON output therefore contains names such as
-  `content-type`, and `x-total-count`.
-- **`run --json`** prints NDJSON: one object per request with `request`, `name`,
-  `method`, `url`, `status`, `reason`, `durationMs`, `headers`
-  (`[{"name","value"}]`), `body` (parsed JSON or `null`), `bodyText` and
-  `captured`.
-- **Body size**: responses are read through the HTTP library's default limit;
-  curlyfries does not raise it.
+- In the UI, `x` clears the active scope and `X` clears every scope; each is
+  behind a `y/n` confirmation. A missing file is an empty store, not an error.
 
 ## Exit codes
 
 | code | meaning |
 |---|---|
-| `0` | a response was received (or interactive mode exited cleanly) |
-| `1` | filesystem or environment: project not found, missing requests directory, IO, transport, timeout, not a terminal, unreadable session file |
-| `2` | CLI usage error |
+| `0` | the UI exited cleanly |
+| `1` | filesystem or environment: project not found, missing requests directory, IO, transport, timeout, refused redirect, not a terminal, unreadable session file |
+| `2` | CLI usage error (from the argument parser) |
 | `3` | project or request definition: invalid JSON, schema violation, template error, undefined variable, output evaluation, unknown request id |
-| `4` | status `>= 400` with `--fail-on-error` |
 
 ## Worked example: the Pirate API
 
@@ -319,14 +292,15 @@ error: unreadable session file .curlyfries/session.json
 | `ships/create` | `Authorization` + an inline body built from `${random.string.8}` and `${random.int.1.500}`, capturing `shipId` and `shipName` |
 | `ships/delete` | `DELETE /ships/${shipId}` with the admiral token |
 | `debug/echo` | proves typed substitution: `/_debug/echo` reports `"typed":42`, `"limit":2` and a `${random.bool}` flag with their JSON types, with `content_type: application/json` |
-| `debug/slow` | the `--timeout` path (`curlyfries run debug/slow --timeout 1` exits `1`) |
-| `ships/missing` | a `404` is a normal result: exit `0`, or `4` with `--fail-on-error` |
+| `debug/slow` | the manifest `"timeout"` (`"timeout": 1` makes a slow request fail with `timed out after 1s`) |
+| `ships/missing` | a `404` is a normal result, shown like any other status |
 
 `ship.name` is unique on that API, so `ships/create` derives a fresh name from
-`${random.string.8}` on every run and can be run repeatedly. The uniqueness rule
-is still visible: pin the random part with `--var` and run twice, and the second
+`${random.string.8}` on every run and can be run repeatedly. To see the
+uniqueness rule, give the request a fixed `"name"` and run it twice: the second
 `201` becomes a `409` (duplicate name). That error envelope has no `id`, so the
-capture refuses to invent one:
+capture refuses to invent one, and the UI shows the refusal in its own
+**Output error** section:
 
 ```
 error: output `shipId` failed in requests/ships/create.json
@@ -334,9 +308,7 @@ error: output `shipId` failed in requests/ships/create.json
   reason: no key `id` in object (available: error, requestId)
 ```
 
-Exit code `3` — the loud answer, rather than a silently missing `shipId`:
-
-```bash
-curlyfries run ships/create --var random.string.8=pinned
-curlyfries run ships/create --var random.string.8=pinned   # 409, exit 3
-```
+The loud answer, rather than a silently missing `shipId`. From the UI, open the
+project, select `auth/login` and press `Enter`, then run the chained requests
+(`ships/detail`, `ships/list`, …) the same way. Captures persist in
+`.curlyfries/session.json` between runs.

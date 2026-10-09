@@ -2,9 +2,9 @@
 //!
 //! A placeholder whose name starts with `random.` is a *built-in*: when no
 //! scope supplies that name, the engine asks this module for a fresh value.
-//! Ordinary lookup runs first, so `--var`, the session store and the
-//! environment can shadow a built-in — `--var random.int.6=4` makes a run
-//! reproducible, which is also how the unit tests stay deterministic.
+//! Ordinary lookup runs first, so the session store and the environment can
+//! shadow a built-in — a captured `random.int.6` makes a run reproducible,
+//! which is also how the unit tests stay deterministic.
 //!
 //! | name | value |
 //! |---|---|

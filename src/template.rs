@@ -14,7 +14,7 @@
 //!
 //! Names starting with `random.` are built-in generators rather than variables
 //! (see [`crate::random`]). They are consulted only when every scope misses, so
-//! `--var`, the session store and the environment can shadow them.
+//! the session store and the environment can shadow them.
 
 use serde_json::Value;
 
@@ -332,7 +332,7 @@ mod tests {
                 .len(),
             7
         );
-        // A scope value shadows the built-in, so `--var` keeps runs reproducible.
+        // A scope value shadows the built-in, which keeps runs reproducible.
         assert_eq!(
             render("${random.int.6}", &vars(&[("random.int.6", json!(4))])).unwrap(),
             json!(4)

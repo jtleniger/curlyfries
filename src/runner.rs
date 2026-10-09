@@ -1,4 +1,4 @@
-//! The single execution path shared by `run` and interactive mode.
+//! The single execution path behind the terminal UI.
 
 use std::time::Duration;
 
@@ -20,14 +20,14 @@ pub struct Runner<'a> {
     pub env_name: Option<String>,
     /// Variables from the selected environment.
     pub env: Map,
-    /// `--var` overrides.
-    pub overrides: Map,
     /// Capture store, persisted between invocations.
     pub session: &'a mut Session,
     /// HTTP agent.
     pub client: ureq::Agent,
     /// Per-request timeout; `None` disables timeouts.
     pub timeout: Option<Duration>,
+    /// Follow same-origin redirects.
+    pub follow_redirects: bool,
     /// Non-fatal problems, drained by the caller and printed to stderr.
     pub warnings: Vec<String>,
 }
@@ -60,12 +60,23 @@ impl Runner<'_> {
                 env_name: self.env_name.as_deref(),
                 env: &self.env,
                 session: self.session.vars(&scope),
-                overrides: &self.overrides,
             };
             execute::render_request(&def, &scopes)?
         };
 
-        let response = execute::execute(&self.client, &resolved, self.timeout)?;
+        let response =
+            execute::execute(&self.client, &resolved, self.timeout, self.follow_redirects)?;
+        if response.final_url != resolved.url {
+            self.warnings.push(format!(
+                "warning: followed redirect to {}",
+                response.final_url
+            ));
+        }
+        if let Some(location) = &response.unfollowed_redirect {
+            self.warnings.push(format!(
+                "warning: response is a redirect to {location}, but following redirects is off; set \"followRedirects\": true in curlyfries.json to follow it"
+            ));
+        }
         let (captured, capture_error) = match execute::capture(&def.outputs, &response, &def.file) {
             Ok(captured) => (captured, None),
             Err(error) => (Map::new(), Some(error)),

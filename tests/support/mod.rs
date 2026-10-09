@@ -86,14 +86,6 @@ impl RecordedRequest {
     pub fn body_json(&self) -> serde_json::Value {
         serde_json::from_slice(&self.body).expect("recorded body is JSON")
     }
-
-    /// Headers with `name: value` lower-cased names, for easier assertions.
-    pub fn header_names(&self) -> Vec<String> {
-        self.headers
-            .iter()
-            .map(|(name, _)| name.to_ascii_lowercase())
-            .collect()
-    }
 }
 
 /// A single-threaded HTTP/1.1 stub server bound to an ephemeral port.
@@ -357,9 +349,9 @@ pub fn load_project(
     (project, entries)
 }
 
-/// Resolves the project's environment the way the CLI would without `--env`.
+/// Resolves the project's environment the way the UI would at startup.
 pub fn environment(project: &curlyfries::project::Project) -> (Option<String>, curlyfries::Map) {
-    match curlyfries::project::resolve_environment(project, None).expect("environment resolves") {
+    match curlyfries::project::resolve_environment(project).expect("environment resolves") {
         Some((name, vars)) => (Some(name), vars),
         None => (None, curlyfries::Map::new()),
     }
@@ -379,10 +371,10 @@ pub fn runner<'a>(
         entries,
         env_name,
         env,
-        overrides: curlyfries::Map::new(),
         session,
         client: curlyfries::execute::client(timeout),
         timeout,
+        follow_redirects: false,
         warnings: Vec::new(),
     }
 }

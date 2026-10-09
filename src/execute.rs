@@ -49,12 +49,20 @@ pub struct ExecResult {
     pub body_json: Option<Value>,
     /// Time from starting the exchange to receiving the body, in milliseconds.
     pub duration_ms: u64,
+    /// URL of the last hop; equal to the requested URL when nothing was followed.
+    pub final_url: String,
+    /// The `Location` value of a `3xx` that was not followed.
+    pub unfollowed_redirect: Option<String>,
 }
 
 /// Builds the HTTP agent. `None` means no timeouts at all.
+///
+/// Redirects are never followed by the agent itself; [`execute`] is the only
+/// place that decides whether to follow one.
 pub fn client(timeout: Option<Duration>) -> ureq::Agent {
     let mut builder = ureq::Agent::config_builder()
         .http_status_as_error(false)
+        .max_redirects(0)
         .user_agent(format!("curlyfries/{}", env!("CARGO_PKG_VERSION")));
     if let Some(duration) = timeout {
         builder = builder
@@ -213,48 +221,120 @@ fn render_failure(
     }
 }
 
+/// How many redirects a single request may follow.
+const MAX_REDIRECTS: usize = 10;
+
 /// Sends `req`, returning the response even for 4xx and 5xx statuses.
+///
+/// With `follow_redirects` unset, a `3xx` is returned as-is with its `Location`
+/// recorded in [`ExecResult::unfollowed_redirect`]. With it set, same-origin
+/// `3xx` redirects are followed up to [`MAX_REDIRECTS`] hops.
 pub fn execute(
     agent: &ureq::Agent,
     req: &ResolvedRequest,
     timeout: Option<Duration>,
+    follow_redirects: bool,
 ) -> Result<ExecResult, Error> {
-    let transport = |message: String| Error::Transport {
-        url: req.url.clone(),
-        message,
-    };
-    let method = Method::from_bytes(req.method.as_bytes())
-        .map_err(|error| transport(format!("invalid method `{}`: {error}", req.method)))?;
-    let uri: ureq::http::Uri = req
-        .url
-        .parse()
-        .map_err(|error| transport(format!("invalid URL: {error}")))?;
+    let headers = header_map(&req.headers, &req.def_file)?;
+    let mut method =
+        Method::from_bytes(req.method.as_bytes()).map_err(|error| Error::Transport {
+            url: req.url.clone(),
+            message: format!("invalid method `{}`: {error}", req.method),
+        })?;
+    let mut url = req.url.clone();
+    let mut body = req.body.clone();
 
-    let mut header_map = HeaderMap::new();
-    for (name, value) in &req.headers {
+    let started = Instant::now();
+    let mut hops = 0usize;
+    let mut response = loop {
+        let result = send_once(agent, &method, &url, &headers, body.as_deref(), timeout)?;
+        let location = if matches!(result.status, 301 | 302 | 303 | 307 | 308) {
+            result
+                .header_map
+                .get("location")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        } else {
+            None
+        };
+        let Some(location) = location else {
+            break result;
+        };
+        if !follow_redirects {
+            let mut result = result;
+            result.unfollowed_redirect = Some(location);
+            break result;
+        }
+        hops += 1;
+        if hops > MAX_REDIRECTS {
+            return Err(Error::Redirect {
+                url,
+                message: format!("too many redirects (limit {MAX_REDIRECTS})"),
+            });
+        }
+        let next = resolve_location(&url, &location)?;
+        if !same_origin(&url, &next)? {
+            return Err(Error::Redirect {
+                url: url.clone(),
+                message: format!(
+                    "refusing to follow a redirect to {next} (different scheme, host or port)"
+                ),
+            });
+        }
+        (method, body) = redirect_method(&method, body, result.status);
+        url = next;
+    };
+    response.duration_ms = started.elapsed().as_millis() as u64;
+    response.final_url = url;
+    Ok(response)
+}
+
+/// Validates the resolved header list into a [`HeaderMap`].
+fn header_map(headers: &[(String, String)], def_file: &Path) -> Result<HeaderMap, Error> {
+    let mut map = HeaderMap::new();
+    for (name, value) in headers {
         let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| Error::Schema {
-            path: req.def_file.clone(),
+            path: def_file.to_path_buf(),
             pointer: "/headers".to_string(),
             message: format!("invalid header name `{name}`"),
         })?;
         let header_value = HeaderValue::from_str(value).map_err(|_| Error::Schema {
-            path: req.def_file.clone(),
+            path: def_file.to_path_buf(),
             pointer: "/headers".to_string(),
             message: format!(
                 "invalid value for header `{name}` (control characters are not allowed)"
             ),
         })?;
-        header_map.append(header_name, header_value);
+        map.append(header_name, header_value);
     }
+    Ok(map)
+}
 
-    let mut builder = Request::builder().method(method).uri(uri);
+/// Sends one hop, returning the response as received.
+fn send_once(
+    agent: &ureq::Agent,
+    method: &Method,
+    url: &str,
+    headers: &HeaderMap,
+    body: Option<&str>,
+    timeout: Option<Duration>,
+) -> Result<ExecResult, Error> {
+    let transport = |message: String| Error::Transport {
+        url: url.to_string(),
+        message,
+    };
+    let uri: ureq::http::Uri = url
+        .parse()
+        .map_err(|error| transport(format!("invalid URL: {error}")))?;
+
+    let mut builder = Request::builder().method(method.clone()).uri(uri);
     *builder
         .headers_mut()
-        .expect("request builders always hold headers") = header_map;
+        .expect("request builders always hold headers") = headers.clone();
 
     let started = Instant::now();
-    let outcome = match &req.body {
-        Some(text) => match builder.body(text.clone()) {
+    let outcome = match body {
+        Some(text) => match builder.body(text.to_string()) {
             Ok(request) => agent.run(request),
             Err(error) => return Err(transport(error.to_string())),
         },
@@ -267,7 +347,7 @@ pub fn execute(
         Ok(response) => response,
         Err(ureq::Error::Timeout(_)) => {
             return Err(Error::Timeout {
-                url: req.url.clone(),
+                url: url.to_string(),
                 seconds: timeout.map(|d| d.as_secs()).unwrap_or(0),
             });
         }
@@ -306,7 +386,112 @@ pub fn execute(
         body_text,
         body_json,
         duration_ms,
+        final_url: url.to_string(),
+        unfollowed_redirect: None,
     })
+}
+
+/// The method and body to use for the next hop of a followed redirect.
+fn redirect_method(method: &Method, body: Option<String>, status: u16) -> (Method, Option<String>) {
+    match status {
+        301..=303 => (
+            if *method == Method::HEAD {
+                Method::HEAD
+            } else {
+                Method::GET
+            },
+            None,
+        ),
+        _ => (method.clone(), body),
+    }
+}
+
+/// Resolves `location` against `base` per RFC 3986 §5.3 (http and https bases).
+fn resolve_location(base: &str, location: &str) -> Result<String, Error> {
+    let location = location.split('#').next().unwrap_or("");
+    if location.is_empty() {
+        return Ok(base.to_string());
+    }
+    let lower = location.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return Ok(location.to_string());
+    }
+    let bad_base = || Error::Redirect {
+        url: base.to_string(),
+        message: format!("cannot parse redirect base `{base}`"),
+    };
+    let uri: ureq::http::Uri = base.parse().map_err(|_| bad_base())?;
+    let scheme = uri.scheme_str().ok_or_else(bad_base)?;
+    let authority = uri.authority().ok_or_else(bad_base)?;
+    let origin = format!("{scheme}://{authority}");
+    let path = if uri.path().is_empty() {
+        "/"
+    } else {
+        uri.path()
+    };
+    if let Some(rest) = location.strip_prefix("//") {
+        return Ok(format!("{scheme}://{rest}"));
+    }
+    if location.starts_with('/') {
+        return Ok(format!("{origin}{}", normalize_path(location)));
+    }
+    if location.starts_with('?') {
+        return Ok(format!("{origin}{}{location}", normalize_path(path)));
+    }
+    let directory = match path.rfind('/') {
+        Some(index) => &path[..=index],
+        None => "/",
+    };
+    Ok(format!(
+        "{origin}{}",
+        normalize_path(&format!("{directory}{location}"))
+    ))
+}
+
+/// Normalises a `/`-separated path: drops empty and `.` segments, applies
+/// `..`, and keeps a trailing slash. The result always starts with `/`.
+fn normalize_path(path: &str) -> String {
+    let trailing = path.ends_with('/') || path.ends_with("/.") || path.ends_with("/..");
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
+    }
+    let mut out = format!("/{}", segments.join("/"));
+    if trailing && !out.ends_with('/') {
+        out.push('/');
+    }
+    out
+}
+
+/// Whether `current` and `next` share a scheme, host and port.
+fn same_origin(current: &str, next: &str) -> Result<bool, Error> {
+    Ok(origin(current)? == origin(next)?)
+}
+
+/// `(scheme, host, port)` of a URL, with default ports normalised.
+fn origin(url: &str) -> Result<(String, String, u16), Error> {
+    let uri: ureq::http::Uri = url.parse().map_err(|_| Error::Redirect {
+        url: url.to_string(),
+        message: format!("cannot parse redirect target `{url}`"),
+    })?;
+    let scheme = uri.scheme_str().unwrap_or("").to_ascii_lowercase();
+    let host = uri
+        .host()
+        .ok_or_else(|| Error::Redirect {
+            url: url.to_string(),
+            message: format!("redirect target `{url}` has no host"),
+        })?
+        .to_ascii_lowercase();
+    let port = uri
+        .port_u16()
+        .unwrap_or(if scheme == "https" { 443 } else { 80 });
+    Ok((scheme, host, port))
 }
 
 fn describe(error: ureq::Error) -> String {
@@ -350,12 +535,11 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn scopes_of<'a>(env: &'a Map, session: &'a Map, overrides: &'a Map) -> Scopes<'a> {
+    fn scopes_of<'a>(env: &'a Map, session: &'a Map) -> Scopes<'a> {
         Scopes {
             env_name: Some("dev"),
             env,
             session,
-            overrides,
         }
     }
 
@@ -370,7 +554,7 @@ mod tests {
     fn absolute_paths_pass_through() {
         let env = map(&[("baseUrl", json!("http://127.0.0.1:1"))]);
         let empty = Map::new();
-        let scopes = scopes_of(&env, &empty, &empty);
+        let scopes = scopes_of(&env, &empty);
         assert_eq!(
             build_url(
                 "x",
@@ -386,14 +570,14 @@ mod tests {
     #[test]
     fn base_url_is_joined_without_double_slashes() {
         let empty = Map::new();
-        let overrides = map(&[("baseUrl", json!("http://host:4000/"))]);
-        let scopes = scopes_of(&empty, &empty, &overrides);
+        let env = map(&[("baseUrl", json!("http://host:4000/"))]);
+        let scopes = scopes_of(&env, &empty);
         assert_eq!(
             build_url("x", Path::new("requests/x.json"), "/ships?limit=2", &scopes).unwrap(),
             "http://host:4000/ships?limit=2"
         );
         let env = map(&[("baseUrl", json!("http://host:4000"))]);
-        let scopes = scopes_of(&env, &empty, &empty);
+        let scopes = scopes_of(&env, &empty);
         assert_eq!(
             build_url("x", Path::new("requests/x.json"), "ships", &scopes).unwrap(),
             "http://host:4000/ships"
@@ -407,7 +591,7 @@ mod tests {
     #[test]
     fn missing_base_url_names_the_environment() {
         let empty = Map::new();
-        let scopes = scopes_of(&empty, &empty, &empty);
+        let scopes = scopes_of(&empty, &empty);
         let err = build_url(
             "ships/list",
             Path::new("requests/ships/list.json"),
@@ -425,10 +609,10 @@ mod tests {
         assert_eq!(err.exit_code(), 3);
 
         let null_base = map(&[("baseUrl", json!(null))]);
-        let scopes = scopes_of(&empty, &empty, &null_base);
+        let scopes = scopes_of(&null_base, &empty);
         assert!(build_url("x", Path::new("requests/x.json"), "/ships", &scopes).is_err());
         let empty_base = map(&[("baseUrl", json!(""))]);
-        let scopes = scopes_of(&empty, &empty, &empty_base);
+        let scopes = scopes_of(&empty_base, &empty);
         assert!(build_url("x", Path::new("requests/x.json"), "/ships", &scopes).is_err());
     }
 
@@ -453,7 +637,7 @@ mod tests {
             ("empty", json!("")),
         ]);
         let empty = Map::new();
-        let scopes = scopes_of(&env, &empty, &empty);
+        let scopes = scopes_of(&env, &empty);
         let resolved = render_request(&def, &scopes).unwrap();
         assert_eq!(resolved.url, "http://host:4000/ships?limit=42");
         assert_eq!(resolved.name, "ships/create");
@@ -485,7 +669,7 @@ mod tests {
         )
         .unwrap();
         let empty = Map::new();
-        let scopes = scopes_of(&empty, &empty, &empty);
+        let scopes = scopes_of(&empty, &empty);
         let resolved = render_request(&def, &scopes).unwrap();
         assert_eq!(resolved.body.as_deref(), Some("\"hello\""));
         assert_eq!(
@@ -509,7 +693,7 @@ mod tests {
         .unwrap();
         let env = map(&[("baseUrl", json!("http://host")), ("apiKey", json!("k"))]);
         let empty = Map::new();
-        let scopes = scopes_of(&env, &empty, &empty);
+        let scopes = scopes_of(&env, &empty);
 
         let err = render_request(&def, &scopes).unwrap_err();
         match &err {
@@ -527,7 +711,7 @@ mod tests {
         }
 
         let session = map(&[("token", json!("abc"))]);
-        let scopes = scopes_of(&env, &session, &empty);
+        let scopes = scopes_of(&env, &session);
         let err = render_request(&def, &scopes).unwrap_err();
         match &err {
             Error::UndefinedVariable { pointer, name, .. } => {
@@ -548,7 +732,7 @@ mod tests {
         .unwrap();
         let env = map(&[("baseUrl", json!("http://host"))]);
         let empty = Map::new();
-        let scopes = scopes_of(&env, &empty, &empty);
+        let scopes = scopes_of(&env, &empty);
         let err = render_request(&def, &scopes).unwrap_err();
         let text = err.to_string();
         assert!(text.contains("at:    /body"), "{text}");
@@ -565,7 +749,7 @@ mod tests {
         .unwrap();
         let env = map(&[("baseUrl", json!("http://host")), ("limit", json!(null))]);
         let empty = Map::new();
-        let scopes = scopes_of(&env, &empty, &empty);
+        let scopes = scopes_of(&env, &empty);
         let err = render_request(&def, &scopes).unwrap_err();
         assert!(
             err.to_string().contains("variable `limit` is null"),
@@ -586,6 +770,8 @@ mod tests {
             )
             .ok(),
             duration_ms: 3,
+            final_url: String::new(),
+            unfollowed_redirect: None,
         };
         let def_file = Path::new("requests/ships/create.json");
         let captured = capture(
@@ -653,6 +839,8 @@ mod tests {
             body_text: "not json".to_string(),
             body_json: None,
             duration_ms: 1,
+            final_url: String::new(),
+            unfollowed_redirect: None,
         };
         let captured = capture(
             &[(
@@ -674,6 +862,44 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("response body is not JSON"), "{text}");
         assert!(text.contains("content-type: (none)"), "{text}");
+    }
+
+    #[test]
+    fn resolve_location_covers_the_rfc3986_cases() {
+        assert_eq!(
+            resolve_location("http://127.0.0.1:4000/ships?limit=2", "/ships/6").unwrap(),
+            "http://127.0.0.1:4000/ships/6"
+        );
+        assert_eq!(
+            resolve_location("http://h/a/b?q=1", "c").unwrap(),
+            "http://h/a/c"
+        );
+        assert_eq!(
+            resolve_location("http://h/a/b/", "../c").unwrap(),
+            "http://h/a/c"
+        );
+        assert_eq!(
+            resolve_location("http://h/a", "//other/x").unwrap(),
+            "http://other/x"
+        );
+        assert_eq!(
+            resolve_location("http://h/a?q=1", "?p=2").unwrap(),
+            "http://h/a?p=2"
+        );
+        assert_eq!(
+            resolve_location("http://h/a", "https://h/b").unwrap(),
+            "https://h/b"
+        );
+        assert_eq!(resolve_location("http://h/a", "").unwrap(), "http://h/a");
+    }
+
+    #[test]
+    fn same_origin_normalises_default_ports() {
+        assert!(same_origin("http://h:80/a", "http://h/b").unwrap());
+        assert!(same_origin("http://127.0.0.1:4000/a", "http://127.0.0.1:4000/b").unwrap());
+        assert!(!same_origin("https://h/a", "http://h/a").unwrap());
+        assert!(!same_origin("http://h/a", "http://h:8080/a").unwrap());
+        assert!(!same_origin("http://h/a", "http://evil/a").unwrap());
     }
 
     #[test]

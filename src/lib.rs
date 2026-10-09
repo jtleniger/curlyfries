@@ -21,6 +21,8 @@ pub mod cli;
 pub mod error;
 pub mod execute;
 pub mod expression;
+pub mod import;
+pub mod init;
 pub mod project;
 pub mod random;
 pub mod render;
@@ -50,7 +52,11 @@ where
     match cli::parse_and_run(args, out, err) {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
-            let _ = writeln!(err, "{error}");
+            let _ = writeln!(
+                err,
+                "{}",
+                crate::render::sanitize_for_terminal(&error.to_string())
+            );
             ExitCode::from(error.exit_code())
         }
     }

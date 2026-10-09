@@ -32,7 +32,7 @@ fn capture_lands_in_the_environment_scope_and_is_persisted() {
     );
     let (project, entries) = load_project(&dir);
     let (env_name, env) = environment(&project);
-    let mut session = Session::load(&project.root, true).unwrap();
+    let mut session = Session::load(&project.root).unwrap();
 
     let mut runner = runner(&project, &entries, &mut session, env_name, env);
     let outcome = runner.execute_id("auth/login.json").unwrap();
@@ -41,7 +41,7 @@ fn capture_lands_in_the_environment_scope_and_is_persisted() {
     assert!(runner.warnings.is_empty());
     assert_eq!(runner.session.vars("dev")["token"], json!("tok-123"));
 
-    let reloaded = Session::load(&project.root, true).unwrap();
+    let reloaded = Session::load(&project.root).unwrap();
     assert_eq!(reloaded.vars("dev")["token"], json!("tok-123"));
     let _ = server.finish();
 }
@@ -62,7 +62,7 @@ fn unknown_ids_list_what_is_available() {
     );
     let (project, entries) = load_project(&dir);
     let (env_name, env) = environment(&project);
-    let mut session = Session::load(&project.root, true).unwrap();
+    let mut session = Session::load(&project.root).unwrap();
     let mut runner = runner(&project, &entries, &mut session, env_name, env);
     let error = runner.execute_id("auth/me2").unwrap_err();
     let text = error.to_string();
@@ -89,7 +89,7 @@ fn save_failures_warn_without_failing_the_request() {
     dir.write(".curlyfries", "not a directory");
     let (project, entries) = load_project(&dir);
     let (env_name, env) = environment(&project);
-    let mut session = Session::load(&project.root, true).unwrap();
+    let mut session = Session::load(&project.root).unwrap();
     let mut runner = runner(&project, &entries, &mut session, env_name, env);
 
     let outcome = runner.execute_id("auth/login").unwrap();
@@ -135,7 +135,7 @@ fn captured_values_feed_later_requests() {
     );
     let (project, entries) = load_project(&dir);
     let (env_name, env) = environment(&project);
-    let mut session = Session::load(&project.root, true).unwrap();
+    let mut session = Session::load(&project.root).unwrap();
     {
         let mut runner = runner(&project, &entries, &mut session, env_name, env);
         assert_eq!(
@@ -173,7 +173,7 @@ fn a_second_scope_keeps_its_own_variables() {
     let project = curlyfries::project::discover(dir.path(), None).unwrap();
     let entries = curlyfries::project::collect_requests(&project).unwrap();
 
-    let mut session = Session::load(&project.root, true).unwrap();
+    let mut session = Session::load(&project.root).unwrap();
     for name in ["dev", "stage"] {
         let env = curlyfries::project::load_environment(&project, name).unwrap();
         let mut runner = runner(
@@ -187,7 +187,7 @@ fn a_second_scope_keeps_its_own_variables() {
     }
     assert_eq!(session.vars("dev")["token"], json!("tok-123"));
     assert_eq!(session.vars("stage")["token"], json!("tok-123"));
-    let reloaded = Session::load(&project.root, true).unwrap();
+    let reloaded = Session::load(&project.root).unwrap();
     assert_eq!(reloaded.vars("dev").len(), 1);
     assert_eq!(reloaded.vars("stage").len(), 1);
     let _ = server.finish();
