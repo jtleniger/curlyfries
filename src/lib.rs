@@ -21,6 +21,7 @@ pub mod cli;
 pub mod error;
 pub mod execute;
 pub mod expression;
+pub mod init;
 pub mod project;
 pub mod random;
 pub mod render;

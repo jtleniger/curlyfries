@@ -76,6 +76,14 @@ pub enum Error {
         /// Requests directory that was searched.
         dir: PathBuf,
     },
+    /// `curlyfries init` would overwrite files that already exist.
+    #[error("error: cannot initialize a curlyfries project in {root}\n  existing: {existing}\n  hint: remove these files, or run init in an empty directory", root = root.display(), existing = join_or_none(existing))]
+    InitConflict {
+        /// Directory `init` was asked to fill.
+        root: PathBuf,
+        /// Existing target files, relative to `root`, in check order.
+        existing: Vec<String>,
+    },
     /// A JSON document could not be parsed.
     #[error("error: invalid JSON in {path}\n  reason: {source}", path = path.display())]
     InvalidJson {
@@ -215,6 +223,7 @@ impl Error {
             | Error::ProjectNotFound { .. }
             | Error::MissingDir { .. }
             | Error::NoRequests { .. }
+            | Error::InitConflict { .. }
             | Error::Transport { .. }
             | Error::Timeout { .. }
             | Error::Redirect { .. }

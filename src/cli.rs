@@ -4,19 +4,34 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 use crate::error::Error;
 use crate::project::{self, Entry, Project};
 use crate::render;
 
+/// Subcommands accepted in place of opening the terminal UI.
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Write a starter curlyfries project into the current directory.
+    Init,
+}
+
 /// Filesystem-driven CLI API client.
 #[derive(Debug, Parser)]
-#[command(name = "curlyfries", version, about = "Filesystem-driven CLI API client")]
+#[command(
+    name = "curlyfries",
+    version,
+    about = "Filesystem-driven CLI API client",
+    args_conflicts_with_subcommands = true
+)]
 pub struct Cli {
     /// Project root (overrides the current directory).
     #[arg(short = 'C', long = "project", value_name = "DIR")]
     pub project: Option<PathBuf>,
+    /// Subcommand to run; absent opens the terminal UI.
+    #[command(subcommand)]
+    pub command: Option<Command>,
 }
 
 /// Parses arguments and runs the requested command.
@@ -42,11 +57,14 @@ where
             return Ok(code);
         }
     };
-    dispatch(cli)
+    dispatch(cli, out)
 }
 
-fn dispatch(cli: Cli) -> Result<u8, Error> {
+fn dispatch<W: Write>(cli: Cli, out: &mut W) -> Result<u8, Error> {
     let cwd = std::env::current_dir().map_err(|source| Error::Io { path: None, source })?;
+    if let Some(Command::Init) = cli.command {
+        return crate::init::init(&cwd, out).map(|()| 0);
+    }
     let project =
         project::discover(&cwd, cli.project.as_deref()).map_err(|error| error.relativize(&cwd))?;
     let entries =

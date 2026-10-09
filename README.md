@@ -32,6 +32,10 @@ cargo install --path .        # ~/.cargo/bin/curlyfries
   .curlyfries/session.json       # captured variables (add to .gitignore)
 ```
 
+That is the layout `curlyfries init` writes into an empty directory: the
+manifest, the sample request and environment, and a `.gitignore` covering the
+capture store.
+
 ## Quickstart against the Pirate API
 
 The `sample-api/` directory in this repository holds a small pirate-themed REST
@@ -107,16 +111,24 @@ something. curlyfries needs a terminal on stdin and stdout and exits `1` with
 ## CLI reference
 
 ```
-curlyfries [-C <dir>]
+curlyfries [-C <dir>]     # open the terminal UI
+curlyfries init           # write a starter project into the current directory
 ```
 
 | flag | meaning |
 |---|---|
 | `-C, --project <dir>` | project root; defaults to the current directory |
 
-curlyfries always opens the terminal UI; `--help` and `--version` are the only
-things it prints without one. Environments, the per-request timeout and the
-capture store are configured in files (see
+`init` writes `curlyfries.json`, a sample `requests/ping.json`
+(`GET ${baseUrl}/ping`), `environments/dev.json` (with
+`"baseUrl": "http://127.0.0.1:4000"`) and a `.gitignore` holding `.curlyfries/`,
+printing each created file. It changes nothing when any of those four files
+already exists (exit `1`, `error: cannot initialize a curlyfries project in
+<dir>`), and `-C` cannot be combined with `init` (usage error, exit `2`).
+
+curlyfries otherwise always opens the terminal UI; `--help` and `--version` are
+the only things it prints without one. Environments, the per-request timeout and
+the capture store are configured in files (see
 [`docs/format.md`](docs/format.md)) and driven from inside the UI.
 
 ## Redirects, symlinks and the timeout
@@ -150,7 +162,7 @@ hostile checkout can steer the client on its own. Set them in `curlyfries.json`:
 | code | meaning |
 |---|---|
 | `0` | the UI exited cleanly |
-| `1` | filesystem or environment: project not found, missing requests directory, IO, transport, timeout, refused redirect, not a terminal, unreadable session file |
+| `1` | filesystem or environment: project not found, missing requests directory, IO, transport, timeout, refused redirect, not a terminal, unreadable session file, `init` finding existing files |
 | `2` | CLI usage error (from the argument parser) |
 | `3` | project or request definition: invalid JSON, schema violation, template error, undefined variable, output evaluation, unknown request id |
 
@@ -226,8 +238,8 @@ the session store and the TUI state machine; `tests/execute.rs`, `tests/cli.rs`,
 `tests/tui.rs` and `tests/runner.rs` run against a dependency-free stub HTTP
 server (`tests/support/mod.rs`) on an ephemeral port, so no test touches the
 network. `tests/tui.rs` drives the interface through `ratatui`'s `TestBackend`,
-and `tests/cli.rs` covers the launcher surface (help, version and project
-errors) only.
+and `tests/cli.rs` covers the launcher surface (help, version, project errors
+and `init`) only.
 
 ## More
 
