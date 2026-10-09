@@ -15,7 +15,7 @@ const REQUEST: &str =
 /// Starter environment: the local sample API address.
 const ENVIRONMENT: &str = "{\n  \"baseUrl\": \"http://127.0.0.1:4000\"\n}\n";
 /// Starter ignore list: the capture store is machine-local state.
-const GITIGNORE: &str = ".curlyfries/\n";
+pub(crate) const GITIGNORE: &str = ".curlyfries/\n";
 
 /// Writes a starter project into `root` and reports each created file on `out`.
 ///

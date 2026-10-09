@@ -84,6 +84,24 @@ pub enum Error {
         /// Existing target files, relative to `root`, in check order.
         existing: Vec<String>,
     },
+    /// `curlyfries import` would overwrite files that already exist.
+    #[error("error: cannot import into {root}: these files already exist\n  existing: {existing}\n  hint: remove these files, or import into an empty directory", root = root.display(), existing = join_or_none(existing))]
+    ImportConflict {
+        /// Directory `import` was asked to fill.
+        root: PathBuf,
+        /// Existing target files, relative to `root`, in check order.
+        existing: Vec<String>,
+    },
+    /// The API document could not be read, parsed or understood.
+    #[error("error: invalid API document {path}\n  at:    {pointer}\n  reason: {message}", path = path.display())]
+    InvalidSpec {
+        /// Document that failed.
+        path: PathBuf,
+        /// JSON pointer of the offending value (empty for the document root).
+        pointer: String,
+        /// What is wrong.
+        message: String,
+    },
     /// A JSON document could not be parsed.
     #[error("error: invalid JSON in {path}\n  reason: {source}", path = path.display())]
     InvalidJson {
@@ -224,6 +242,7 @@ impl Error {
             | Error::MissingDir { .. }
             | Error::NoRequests { .. }
             | Error::InitConflict { .. }
+            | Error::ImportConflict { .. }
             | Error::Transport { .. }
             | Error::Timeout { .. }
             | Error::Redirect { .. }
@@ -231,6 +250,7 @@ impl Error {
             | Error::NotATerminal { .. }
             | Error::Interactive { .. } => 1,
             Error::InvalidJson { .. }
+            | Error::InvalidSpec { .. }
             | Error::Schema { .. }
             | Error::Template { .. }
             | Error::UndefinedVariable { .. }
@@ -257,6 +277,15 @@ impl Error {
             Error::InvalidJson { path, source } => Error::InvalidJson {
                 path: short(path),
                 source,
+            },
+            Error::InvalidSpec {
+                path,
+                pointer,
+                message,
+            } => Error::InvalidSpec {
+                path: short(path),
+                pointer,
+                message,
             },
             Error::Schema {
                 path,
@@ -427,6 +456,39 @@ mod tests {
         };
         assert_eq!(timeout.exit_code(), 1);
         assert!(timeout.to_string().contains("timed out after 30s"));
+    }
+
+    #[test]
+    fn import_errors_render_and_exit() {
+        let conflict = Error::ImportConflict {
+            root: PathBuf::from("/tmp/imported"),
+            existing: vec![
+                "curlyfries.json".to_string(),
+                "requests/ships/list.json".to_string(),
+            ],
+        };
+        assert_eq!(conflict.exit_code(), 1);
+        let text = conflict.to_string();
+        assert!(
+            text.starts_with("error: cannot import into /tmp/imported: these files already exist"),
+            "{text}"
+        );
+        assert!(
+            text.contains("existing: curlyfries.json, requests/ships/list.json"),
+            "{text}"
+        );
+        assert!(text.contains("import into an empty directory"), "{text}");
+
+        let spec = Error::InvalidSpec {
+            path: PathBuf::from("spec.json"),
+            pointer: "/openapi".to_string(),
+            message: "unsupported `openapi` version `2.0` (expected 3.x)".to_string(),
+        };
+        assert_eq!(spec.exit_code(), 3);
+        assert_eq!(
+            spec.to_string(),
+            "error: invalid API document spec.json\n  at:    /openapi\n  reason: unsupported `openapi` version `2.0` (expected 3.x)"
+        );
     }
 
     #[test]

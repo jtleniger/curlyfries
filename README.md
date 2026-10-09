@@ -32,9 +32,9 @@ cargo install --path .        # ~/.cargo/bin/curlyfries
   .curlyfries/session.json       # captured variables (add to .gitignore)
 ```
 
-That is the layout `curlyfries init` writes into an empty directory: the
-manifest, the sample request and environment, and a `.gitignore` covering the
-capture store.
+That is the layout `curlyfries init` writes into an empty directory (as does
+`curlyfries import`, from an API document): the manifest, requests, environments
+and a `.gitignore` covering the capture store.
 
 ## Quickstart against the Pirate API
 
@@ -113,6 +113,7 @@ something. curlyfries needs a terminal on stdin and stdout and exits `1` with
 ```
 curlyfries [-C <dir>]     # open the terminal UI
 curlyfries init           # write a starter project into the current directory
+curlyfries import <SPEC>  # write a project from an OpenAPI 3.x or Swagger 2.0 document
 ```
 
 | flag | meaning |
@@ -125,6 +126,21 @@ curlyfries init           # write a starter project into the current directory
 printing each created file. It changes nothing when any of those four files
 already exists (exit `1`, `error: cannot initialize a curlyfries project in
 <dir>`), and `-C` cannot be combined with `init` (usage error, exit `2`).
+
+`import <SPEC>` reads a local OpenAPI 3.x or Swagger 2.0 document (JSON or
+YAML) and writes the same layout: one request file per operation under
+`requests/<first tag>/<operationId>.json`, falling back to `default/` and
+`<method>-<path>` when the operation names neither, plus the manifest, a
+`.gitignore` and a single `environments/default.json` holding the document's
+`baseUrl`. Operation parameters become `${name}` placeholders for you to fill
+in, while request bodies are rendered from the document's schemas — so an
+operation without parameters runs as soon as it is imported. Like `init`, it
+changes nothing when any target file already exists (exit `1`, `error: cannot
+import into <dir>: these files already exist`), and `-C` cannot be combined with
+`import` (usage error, exit `2`). The document must be a local file: nothing is
+fetched, not even external `$ref`s, and `trace` operations, non-JSON request
+bodies and `cookie` parameters are skipped. An unreadable, unparsable or
+unsupported document fails with `error: invalid API document <path>` (exit `3`).
 
 curlyfries otherwise always opens the terminal UI; `--help` and `--version` are
 the only things it prints without one. Environments, the per-request timeout and
@@ -162,9 +178,9 @@ hostile checkout can steer the client on its own. Set them in `curlyfries.json`:
 | code | meaning |
 |---|---|
 | `0` | the UI exited cleanly |
-| `1` | filesystem or environment: project not found, missing requests directory, IO, transport, timeout, refused redirect, not a terminal, unreadable session file, `init` finding existing files |
+| `1` | filesystem or environment: project not found, missing requests directory, IO, transport, timeout, refused redirect, not a terminal, unreadable session file, `init` or `import` finding existing files |
 | `2` | CLI usage error (from the argument parser) |
-| `3` | project or request definition: invalid JSON, schema violation, template error, undefined variable, output evaluation, unknown request id |
+| `3` | project or request definition: invalid JSON, schema violation, template error, undefined variable, output evaluation, unknown request id, invalid API document |
 
 ## What failures look like
 
@@ -238,8 +254,8 @@ the session store and the TUI state machine; `tests/execute.rs`, `tests/cli.rs`,
 `tests/tui.rs` and `tests/runner.rs` run against a dependency-free stub HTTP
 server (`tests/support/mod.rs`) on an ephemeral port, so no test touches the
 network. `tests/tui.rs` drives the interface through `ratatui`'s `TestBackend`,
-and `tests/cli.rs` covers the launcher surface (help, version, project errors
-and `init`) only.
+and `tests/cli.rs` covers the launcher surface (help, version, project errors,
+`init` and `import`) only.
 
 ## More
 
