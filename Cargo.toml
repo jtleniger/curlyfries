@@ -1,6 +1,6 @@
 [package]
 name = "curlyfries"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "Filesystem-driven CLI API client: requests as JSON files, environments as JSON, captures persisted in a session file"
