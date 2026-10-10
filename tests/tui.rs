@@ -18,7 +18,7 @@ const LOGIN: &str = r#"{
   "method": "POST",
   "path": "/auth/login",
   "body": { "username": "silver" },
-  "outputs": [ { "token": "response.body.access_token" } ]
+  "outputs": { "token": "response.body.access_token" }
 }"#;
 
 const SHIPS: &str = r#"{
@@ -29,7 +29,7 @@ const SHIPS: &str = r#"{
 const CREATE: &str = r#"{
   "method": "POST",
   "path": "/ships",
-  "outputs": [ { "shipId": "response.body.id" } ]
+  "outputs": { "shipId": "response.body.id" }
 }"#;
 
 /// A key press with no modifiers.
@@ -117,6 +117,61 @@ fn enter_runs_the_selected_request_and_shows_the_response() {
     assert_eq!(
         session_json(&dir)["varScopes"]["dev"]["token"],
         json!("tok-123")
+    );
+    let _ = server.finish();
+}
+
+#[test]
+fn secret_values_are_masked_in_the_ui() {
+    let server = StubServer::start(|_| {
+        vec![StubResponse::json(
+            200,
+            "OK",
+            r#"{"access_token":"tok-123"}"#,
+        )]
+    });
+    let dir = project_fixture(
+        "tui-secret",
+        &server,
+        &[(
+            "requests/ships/list.json",
+            r#"{
+              "method": "GET",
+              "path": "/ships",
+              "headers": { "Authorization": "Bearer ${apiKey}" },
+              "outputs": { "token": { "secret": true, "value": "response.body.access_token" } }
+            }"#,
+        )],
+    );
+    dir.write(
+        "environments/dev.json",
+        &format!(
+            r#"{{ "baseUrl": "{}", "apiKey": {{ "secret": true, "value": "s3cret" }} }}"#,
+            server.base_url
+        ),
+    );
+    let mut app = open(&dir);
+    app.select_id("ships/list");
+    app.on_key(key(KeyCode::Enter));
+    app.wait_for_run(Duration::from_secs(5));
+
+    let mask = curlyfries::variables::SECRET_MASK;
+    let screen = rendered(&mut app, 120, 40);
+    // The resolved request pane masks the secret header...
+    assert!(
+        screen.contains(&format!("Authorization: Bearer {mask}")),
+        "{screen}"
+    );
+    // ...the captures strip masks the secret capture...
+    assert!(screen.contains(&format!("token = {mask}")), "{screen}");
+    // ...but the response body is server data and is never masked.
+    assert!(screen.contains("tok-123"), "{screen}");
+    assert!(!screen.contains("s3cret"), "{screen}");
+
+    // The secret capture is still persisted, wrapped, so chains survive a restart.
+    assert_eq!(
+        session_json(&dir)["varScopes"]["dev"]["token"],
+        json!({ "secret": true, "value": "tok-123" })
     );
     let _ = server.finish();
 }
@@ -233,7 +288,10 @@ fn clear_scope_needs_confirmation_and_removes_the_scope() {
     // `Esc` cancels and leaves the scope alone.
     app.on_key(key(KeyCode::Esc));
     let cancelled = rendered(&mut app, 120, 40);
-    assert!(!cancelled.contains("delete every captured variable"), "{cancelled}");
+    assert!(
+        !cancelled.contains("delete every captured variable"),
+        "{cancelled}"
+    );
     assert_eq!(
         session_json(&dir)["varScopes"]["dev"]["token"],
         json!("tok-123")
@@ -264,7 +322,7 @@ fn clear_all_removes_every_scope() {
     );
     dir.write(
         ".curlyfries/session.json",
-        r#"{ "version": 1, "updatedAtUnix": 1, "varScopes": {
+        r#"{ "version": 2, "updatedAtUnix": 1, "varScopes": {
             "dev": { "token": "a" },
             "stage": { "token": "b" }
         } }"#,
@@ -317,7 +375,7 @@ fn broken_session_file_is_an_error() {
     );
     dir.write(
         ".curlyfries/session.json",
-        r#"{ "version": 2, "updatedAtUnix": 1, "varScopes": {} }"#,
+        r#"{ "version": 3, "updatedAtUnix": 1, "varScopes": {} }"#,
     );
     let (project, entries) = build(&dir);
     let error = match App::new(project, entries) {
@@ -327,7 +385,7 @@ fn broken_session_file_is_an_error() {
     let text = error.to_string();
     assert!(text.contains("unreadable session file"), "{text}");
     assert!(
-        text.contains("unsupported version 2 (expected 1)"),
+        text.contains("unsupported version 3 (expected 2)"),
         "{text}"
     );
     let _ = server.finish();

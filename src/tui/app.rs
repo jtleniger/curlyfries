@@ -1,5 +1,6 @@
 //! TUI state machine: selection, environment switching and request runs.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
@@ -22,6 +23,7 @@ use crate::tui::json;
 use crate::tui::theme::Theme;
 use crate::tui::tree::{self, TreeRow};
 use crate::tui::ui;
+use crate::variables::Variables;
 
 /// A destructive capture clear waiting for confirmation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,7 +97,7 @@ pub struct App {
     pub(crate) filter_active: bool,
     pub(crate) selected_id: Option<String>,
     pub(crate) env_name: Option<String>,
-    env: Map,
+    env: Variables,
     timeout: Option<Duration>,
     session: Session,
     pub(crate) request_view: RequestView,
@@ -122,7 +124,7 @@ impl App {
     pub fn new(project: Project, entries: Vec<Entry>) -> Result<App, Error> {
         let (env_name, env) = match project::resolve_environment(&project)? {
             Some((name, vars)) => (Some(name), vars),
-            None => (None, Map::new()),
+            None => (None, Variables::default()),
         };
         let timeout = project.manifest.timeout();
         let session = Session::load(&project.root)?;
@@ -242,7 +244,7 @@ impl App {
                 match message.outcome {
                     Ok(outcome) => {
                         if message.scope == self.scope() {
-                            self.session.set(&message.scope, outcome.captured.clone());
+                            self.session.set(&message.scope, &outcome.captured);
                         }
                         let status = format!(
                             "← {} {}  {}ms",
@@ -252,7 +254,7 @@ impl App {
                         );
                         self.last = Some(LastRun {
                             status: Some((render::status_class(outcome.response.status), status)),
-                            url: outcome.request.url.clone(),
+                            url: outcome.display_url.clone(),
                             error: outcome.capture_error.map(|error| error.to_string()),
                             response: Some(outcome.response),
                         });
@@ -353,6 +355,11 @@ impl App {
     /// Captured variables of the active scope.
     pub(crate) fn captured(&self) -> &Map {
         self.session.vars(self.scope())
+    }
+
+    /// Names among the active scope's captures that are secret.
+    pub(crate) fn captured_secrets(&self) -> &BTreeSet<String> {
+        &self.session.variables(self.scope()).secrets
     }
 
     /// The active capture scope key.
@@ -595,7 +602,7 @@ impl App {
             match choice {
                 EnvChoice::NoneKey => {
                     self.env_name = None;
-                    self.env = Map::new();
+                    self.env = Variables::default();
                 }
                 EnvChoice::Named(name) => match project::load_environment(&self.project, &name) {
                     Ok(vars) => {
@@ -640,9 +647,9 @@ impl App {
             let scopes = Scopes {
                 env_name: self.env_name.as_deref(),
                 env: &self.env,
-                session: self.session.vars(self.scope()),
+                session: self.session.variables(self.scope()),
             };
-            match execute::render_request(&self.defs[index], &scopes) {
+            match execute::render_request_display(&self.defs[index], &scopes) {
                 Ok(request) => resolved_lines(&request, &theme),
                 Err(error) => vec![Line::styled(
                     format!("{error}"),

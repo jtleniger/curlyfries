@@ -350,10 +350,12 @@ pub fn load_project(
 }
 
 /// Resolves the project's environment the way the UI would at startup.
-pub fn environment(project: &curlyfries::project::Project) -> (Option<String>, curlyfries::Map) {
+pub fn environment(
+    project: &curlyfries::project::Project,
+) -> (Option<String>, curlyfries::variables::Variables) {
     match curlyfries::project::resolve_environment(project).expect("environment resolves") {
         Some((name, vars)) => (Some(name), vars),
-        None => (None, curlyfries::Map::new()),
+        None => (None, curlyfries::variables::Variables::default()),
     }
 }
 
@@ -363,7 +365,7 @@ pub fn runner<'a>(
     entries: &'a [curlyfries::project::Entry],
     session: &'a mut curlyfries::session::Session,
     env_name: Option<String>,
-    env: curlyfries::Map,
+    env: curlyfries::variables::Variables,
 ) -> curlyfries::runner::Runner<'a> {
     let timeout = Some(Duration::from_secs(5));
     curlyfries::runner::Runner {

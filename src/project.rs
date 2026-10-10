@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::Map;
 use crate::error::Error;
+use crate::variables::{self, Variables};
 
 /// The manifest file whose presence marks a project root.
 pub const MANIFEST_FILE: &str = "curlyfries.json";
@@ -362,8 +362,8 @@ pub fn valid_env_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-/// Loads an environment as a flat variable map (values are literal).
-pub fn load_environment(project: &Project, name: &str) -> Result<Map, Error> {
+/// Loads an environment as a variable map (values are literal).
+pub fn load_environment(project: &Project, name: &str) -> Result<Variables, Error> {
     let file = project.environment_file(name);
     if !valid_env_name(name) {
         return Err(Error::Schema {
@@ -398,7 +398,11 @@ pub fn load_environment(project: &Project, name: &str) -> Result<Map, Error> {
         source,
     })?;
     match value {
-        Value::Object(map) => Ok(map),
+        Value::Object(map) => variables::split_document("", &map).map_err(|p| Error::Schema {
+            path: file.clone(),
+            pointer: p.pointer,
+            message: p.message,
+        }),
         _ => Err(Error::Schema {
             path: file,
             pointer: String::new(),
@@ -410,7 +414,7 @@ pub fn load_environment(project: &Project, name: &str) -> Result<Map, Error> {
 /// Picks the environment to use at startup: the manifest `defaultEnvironment`,
 /// else the only environment file, else none. Several candidates with no default
 /// open the UI on the `(none)` scope, where `e` picks one.
-pub fn resolve_environment(project: &Project) -> Result<Option<(String, Map)>, Error> {
+pub fn resolve_environment(project: &Project) -> Result<Option<(String, Variables)>, Error> {
     if let Some(name) = project.manifest.default_environment.clone() {
         return Ok(Some((name.clone(), load_environment(project, &name)?)));
     }
@@ -627,7 +631,11 @@ mod tests {
         let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b/alpha", "b/zeta", "nested/deep/deeper"]);
         assert!(entries[0].file.ends_with("requests/a.json"));
-        assert!(entries[3].file.ends_with("requests/nested/deep/deeper.json"));
+        assert!(
+            entries[3]
+                .file
+                .ends_with("requests/nested/deep/deeper.json")
+        );
     }
 
     #[test]
@@ -674,7 +682,10 @@ mod tests {
         let project = discover(dir.path(), None).unwrap();
         let (name, vars) = resolve_environment(&project).unwrap().unwrap();
         assert_eq!(name, "stage");
-        assert_eq!(vars["baseUrl"], serde_json::json!("http://stage"));
+        assert_eq!(
+            vars.get("baseUrl"),
+            Some(&serde_json::json!("http://stage"))
+        );
 
         // the only environment.
         let single = project_with(&[
@@ -684,7 +695,7 @@ mod tests {
         let project = discover(single.path(), None).unwrap();
         let (name, vars) = resolve_environment(&project).unwrap().unwrap();
         assert_eq!(name, "only");
-        assert_eq!(vars["a"], serde_json::json!(1));
+        assert_eq!(vars.get("a"), Some(&serde_json::json!(1)));
 
         // none at all.
         let none = project_with(&[(MANIFEST_FILE, "{}")]);
@@ -756,7 +767,52 @@ mod tests {
         ]);
         let project = discover(dir.path(), None).unwrap();
         let vars = load_environment(&project, "dev").unwrap();
-        assert_eq!(vars["baseUrl"], serde_json::json!("http://${host}"));
+        assert_eq!(
+            vars.get("baseUrl"),
+            Some(&serde_json::json!("http://${host}"))
+        );
+    }
+
+    #[test]
+    fn environment_secret_wrappers_unwrap_and_flag() {
+        let dir = project_with(&[
+            (MANIFEST_FILE, "{}"),
+            (
+                "environments/dev.json",
+                r#"{
+                  "baseUrl": "http://127.0.0.1:4000",
+                  "limit": 2,
+                  "pirate": { "secret": true, "value": { "username": "silver" } }
+                }"#,
+            ),
+            (
+                "environments/bad.json",
+                r#"{ "pirate": { "secret": true } }"#,
+            ),
+        ]);
+        let project = discover(dir.path(), None).unwrap();
+        let vars = load_environment(&project, "dev").unwrap();
+        assert_eq!(
+            vars.get("pirate"),
+            Some(&serde_json::json!({ "username": "silver" }))
+        );
+        assert_eq!(vars.get("limit"), Some(&serde_json::json!(2)));
+        assert!(vars.is_secret("pirate"));
+        assert!(!vars.is_secret("limit"));
+        assert_eq!(vars.secrets, ["pirate".to_string()].into_iter().collect());
+
+        // The `secret`-key rule makes a bare wrapper an error, located by pointer.
+        let err = load_environment(&project, "bad").unwrap_err();
+        match &err {
+            Error::Schema {
+                pointer, message, ..
+            } => {
+                assert_eq!(pointer, "/pirate");
+                assert_eq!(message, "a secret value needs a `value` key");
+            }
+            other => panic!("wrong error: {other}"),
+        }
+        assert!(err.to_string().contains("environments/bad.json"), "{err}");
     }
 
     #[test]

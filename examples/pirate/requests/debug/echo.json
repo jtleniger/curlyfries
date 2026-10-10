@@ -8,8 +8,8 @@
     "typed": 42,
     "flag": "${random.bool}"
   },
-  "outputs": [
-    { "echoMethod": "response.body.method" },
-    { "echoBody": "response.body.body" }
-  ]
+  "outputs": {
+    "echoMethod": "response.body.method",
+    "echoBody": "response.body.body"
+  }
 }

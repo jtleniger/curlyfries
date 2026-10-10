@@ -11,28 +11,29 @@ use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::Map;
 use crate::error::Error;
+use crate::variables::{self, Variables};
 
 /// Directory holding the session file, relative to the project root.
 pub const SESSION_DIR: &str = ".curlyfries";
 /// Name of the session file.
 pub const SESSION_FILE: &str = "session.json";
 /// Format version written by this tool.
-pub const SESSION_VERSION: u32 = 1;
+pub const SESSION_VERSION: u32 = 2;
 /// Scope key used when no environment is selected.
 pub const NO_ENV_KEY: &str = "(none)";
 
-static EMPTY: LazyLock<Map> = LazyLock::new(Map::new);
+static EMPTY_VARIABLES: LazyLock<Variables> = LazyLock::new(Variables::default);
 
 /// In-memory view of the session file.
 #[derive(Debug)]
 pub struct Session {
     /// Path the session would be written to.
     pub path: PathBuf,
-    scopes: BTreeMap<String, Map>,
+    scopes: BTreeMap<String, Variables>,
 }
 
 /// On-disk shape of the session file.
@@ -57,18 +58,29 @@ impl Session {
     }
 
     /// Variables stored in `scope`, empty when the scope is unknown.
+    pub fn variables(&self, scope: &str) -> &Variables {
+        self.scopes.get(scope).unwrap_or(&EMPTY_VARIABLES)
+    }
+
+    /// The variable values stored in `scope`, empty when the scope is unknown.
     pub fn vars(&self, scope: &str) -> &Map {
-        self.scopes.get(scope).unwrap_or(&EMPTY)
+        &self.variables(scope).vars
     }
 
     /// Merges `vars` into `scope`, returning whether anything was stored.
-    pub fn set(&mut self, scope: &str, vars: Map) -> bool {
+    ///
+    /// An overwrite updates the secret flag along with the value.
+    pub fn set(&mut self, scope: &str, vars: &Variables) -> bool {
         if vars.is_empty() {
             return false;
         }
         let entry = self.scopes.entry(scope.to_string()).or_default();
-        for (name, value) in vars {
-            entry.insert(name, value);
+        for (name, value) in &vars.vars {
+            entry.insert(
+                name.clone(),
+                value.clone(),
+                vars.secrets.contains(name.as_str()),
+            );
         }
         true
     }
@@ -79,10 +91,10 @@ impl Session {
             Some(scope) => self
                 .scopes
                 .remove(scope)
-                .map(|vars| vars.len())
+                .map(|vars| vars.vars.len())
                 .unwrap_or(0),
             None => {
-                let removed = self.scopes.values().map(|vars| vars.len()).sum();
+                let removed = self.scopes.values().map(|vars| vars.vars.len()).sum();
                 self.scopes.clear();
                 removed
             }
@@ -105,7 +117,7 @@ impl Session {
             var_scopes: self
                 .scopes
                 .iter()
-                .map(|(scope, vars)| (scope.clone(), Value::Object(vars.clone())))
+                .map(|(scope, vars)| (scope.clone(), Value::Object(encode_scope(vars))))
                 .collect(),
         };
         let mut text = serde_json::to_string_pretty(&file).expect("session JSON serializes");
@@ -131,7 +143,22 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-fn read_scopes(path: &Path) -> Result<BTreeMap<String, Map>, Error> {
+/// Serializes one scope: a secret name is written as a `secret` wrapper.
+fn encode_scope(vars: &Variables) -> Map {
+    vars.vars
+        .iter()
+        .map(|(name, value)| {
+            let value = if vars.secrets.contains(name) {
+                json!({ "secret": true, "value": value })
+            } else {
+                value.clone()
+            };
+            (name.clone(), value)
+        })
+        .collect()
+}
+
+fn read_scopes(path: &Path) -> Result<BTreeMap<String, Variables>, Error> {
     let unreadable = |reason: String| Error::SessionFile {
         path: path.to_path_buf(),
         reason,
@@ -180,7 +207,9 @@ fn read_scopes(path: &Path) -> Result<BTreeMap<String, Map>, Error> {
                 let Some(vars) = vars.as_object() else {
                     return Err(unreadable(format!("`varScopes.{scope}` must be an object")));
                 };
-                scopes.insert(scope.clone(), vars.clone());
+                let split = variables::split_document(&format!("/varScopes/{scope}"), vars)
+                    .map_err(|p| unreadable(format!("{}: {}", p.pointer, p.message)))?;
+                scopes.insert(scope.clone(), split);
             }
         }
         _ => return Err(unreadable("missing or invalid `varScopes`".to_string())),
@@ -201,6 +230,17 @@ mod tests {
             .collect()
     }
 
+    fn vars(pairs: &[(&str, Value)]) -> Variables {
+        Variables::from_values(map(pairs))
+    }
+
+    /// A scope with one secret value among the plain ones.
+    fn vars_with_secret(pairs: &[(&str, Value)], secret: &str, secret_value: Value) -> Variables {
+        let mut variables = vars(pairs);
+        variables.insert(secret.to_string(), secret_value, true);
+        variables
+    }
+
     #[test]
     fn missing_file_loads_empty() {
         let dir = TempDir::new("session-empty");
@@ -213,15 +253,25 @@ mod tests {
     fn save_and_load_round_trip_per_scope() {
         let dir = TempDir::new("session-round");
         let mut session = Session::load(dir.path()).unwrap();
-        assert!(session.set("dev", map(&[("token", json!("abc")), ("shipId", json!(6))])));
-        assert!(session.set(NO_ENV_KEY, map(&[("loose", json!(true))])));
+        assert!(session.set(
+            "dev",
+            &vars_with_secret(&[("shipId", json!(6))], "token", json!("abc"))
+        ));
+        assert!(session.set(NO_ENV_KEY, &vars(&[("loose", json!(true))])));
         session.save().unwrap();
 
         let text = fs::read_to_string(&session.path).unwrap();
         assert!(text.ends_with("\n"), "{text}");
-        assert!(text.contains("\"version\": 1"), "{text}");
+        assert!(text.contains("\"version\": 2"), "{text}");
         assert!(text.contains("\"varScopes\""), "{text}");
         assert!(text.contains("\"updatedAtUnix\""), "{text}");
+        // A secret capture is stored wrapped; a plain one stays bare.
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            parsed["varScopes"]["dev"]["token"],
+            json!({ "secret": true, "value": "abc" })
+        );
+        assert_eq!(parsed["varScopes"]["dev"]["shipId"], json!(6));
         assert!(
             !session
                 .path
@@ -233,7 +283,10 @@ mod tests {
         let reloaded = Session::load(dir.path()).unwrap();
         assert_eq!(reloaded.vars("dev")["token"], json!("abc"));
         assert_eq!(reloaded.vars("dev")["shipId"], json!(6));
+        assert!(reloaded.variables("dev").is_secret("token"));
+        assert!(!reloaded.variables("dev").is_secret("shipId"));
         assert_eq!(reloaded.vars(NO_ENV_KEY)["loose"], json!(true));
+        assert!(!reloaded.variables(NO_ENV_KEY).is_secret("loose"));
         assert!(reloaded.vars("stage").is_empty());
 
         let stored: Value = serde_json::from_str(&text).unwrap();
@@ -242,16 +295,44 @@ mod tests {
     }
 
     #[test]
+    fn a_secret_capture_wrapper_is_read_and_a_bad_one_is_reported() {
+        let dir = TempDir::new("session-secret-parse");
+        dir.write(
+            ".curlyfries/session.json",
+            r#"{ "version": 2, "updatedAtUnix": 1, "varScopes": {
+              "dev": { "token": { "secret": true, "value": "tok-123" }, "role": "admin" }
+            } }"#,
+        );
+        let session = Session::load(dir.path()).unwrap();
+        assert_eq!(session.vars("dev")["token"], json!("tok-123"));
+        assert!(session.variables("dev").is_secret("token"));
+        assert!(!session.variables("dev").is_secret("role"));
+
+        dir.write(
+            ".curlyfries/session.json",
+            r#"{ "version": 2, "updatedAtUnix": 1, "varScopes": {
+              "dev": { "token": { "secret": true } }
+            } }"#,
+        );
+        let err = Session::load(dir.path()).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("/varScopes/dev/token: a secret value needs a `value` key"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn unsupported_version_and_unknown_field_are_errors() {
         let dir = TempDir::new("session-version");
         dir.write(
             ".curlyfries/session.json",
-            r#"{ "version": 2, "updatedAtUnix": 1, "varScopes": {} }"#,
+            r#"{ "version": 1, "updatedAtUnix": 1, "varScopes": {} }"#,
         );
         let err = Session::load(dir.path()).unwrap_err();
         assert!(
             err.to_string()
-                .contains("unsupported version 2 (expected 1)"),
+                .contains("unsupported version 1 (expected 2)"),
             "{err}"
         );
         assert!(err.to_string().contains("press x"), "{err}");
@@ -259,14 +340,14 @@ mod tests {
 
         dir.write(
             ".curlyfries/session.json",
-            r#"{ "version": 1, "updatedAtUnix": 1, "varScopes": {}, "extra": 1 }"#,
+            r#"{ "version": 2, "updatedAtUnix": 1, "varScopes": {}, "extra": 1 }"#,
         );
         let err = Session::load(dir.path()).unwrap_err();
         assert!(err.to_string().contains("unknown key `extra`"), "{err}");
 
         dir.write(
             ".curlyfries/session.json",
-            r#"{ "version": 1, "updatedAtUnix": 1, "varScopes": { "dev": 3 } }"#,
+            r#"{ "version": 2, "updatedAtUnix": 1, "varScopes": { "dev": 3 } }"#,
         );
         let err = Session::load(dir.path()).unwrap_err();
         assert!(
@@ -277,7 +358,7 @@ mod tests {
 
         dir.write(
             ".curlyfries/session.json",
-            r#"{ "version": "1", "updatedAtUnix": 1, "varScopes": {} }"#,
+            r#"{ "version": "2", "updatedAtUnix": 1, "varScopes": {} }"#,
         );
         let err = Session::load(dir.path()).unwrap_err();
         assert!(
@@ -295,8 +376,8 @@ mod tests {
     fn clear_removes_one_scope_or_all() {
         let dir = TempDir::new("session-clear");
         let mut session = Session::load(dir.path()).unwrap();
-        session.set("dev", map(&[("a", json!(1)), ("b", json!(2))]));
-        session.set("stage", map(&[("c", json!(3))]));
+        session.set("dev", &vars(&[("a", json!(1)), ("b", json!(2))]));
+        session.set("stage", &vars(&[("c", json!(3))]));
         assert_eq!(session.clear(Some("dev")), 2);
         assert!(session.vars("dev").is_empty());
         assert_eq!(session.vars("stage")["c"], json!(3));
@@ -309,8 +390,19 @@ mod tests {
     fn set_reports_whether_anything_changed() {
         let dir = TempDir::new("session-set");
         let mut session = Session::load(dir.path()).unwrap();
-        assert!(!session.set("dev", Map::new()));
-        assert!(session.set("dev", map(&[("a", json!(1))])));
-        assert!(session.set("dev", map(&[("a", json!(1))])));
+        assert!(!session.set("dev", &Variables::default()));
+        assert!(session.set("dev", &vars(&[("a", json!(1))])));
+        assert!(session.set("dev", &vars(&[("a", json!(1))])));
+    }
+
+    #[test]
+    fn set_overwrites_the_secret_flag() {
+        let dir = TempDir::new("session-secret-overwrite");
+        let mut session = Session::load(dir.path()).unwrap();
+        session.set("dev", &vars_with_secret(&[], "token", json!("a")));
+        assert!(session.variables("dev").is_secret("token"));
+        session.set("dev", &vars(&[("token", json!("b"))]));
+        assert!(!session.variables("dev").is_secret("token"));
+        assert_eq!(session.vars("dev")["token"], json!("b"));
     }
 }

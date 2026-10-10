@@ -42,7 +42,7 @@ fn help_and_version_exit_cleanly() {
     let version = run_binary(dir.path(), &["--version"]);
     assert_eq!(exit_code(&version), 0);
     assert!(
-        stdout(&version).contains("curlyfries 0.1.0"),
+        stdout(&version).contains(concat!("curlyfries ", env!("CARGO_PKG_VERSION"))),
         "{}",
         stdout(&version)
     );
@@ -420,7 +420,7 @@ fn import_writes_a_runnable_project() {
         .expect("the health request was imported");
     let definition =
         curlyfries::request::load_request(&health.id, &health.file).expect("health request loads");
-    let session = curlyfries::Map::new();
+    let session = curlyfries::variables::Variables::default();
     let scopes = curlyfries::scopes::Scopes {
         env_name: Some("default"),
         env: &vars,
@@ -522,7 +522,7 @@ paths:
     let definition =
         curlyfries::request::load_request(&ping.id, &ping.file).expect("ping request loads");
     let (env_name, vars) = environment(&project);
-    let session = curlyfries::Map::new();
+    let session = curlyfries::variables::Variables::default();
     let scopes = curlyfries::scopes::Scopes {
         env_name: env_name.as_deref(),
         env: &vars,

@@ -33,10 +33,11 @@ fn send(
     timeout: Option<Duration>,
     follow_redirects: bool,
 ) -> Result<ExecResult, Error> {
-    let session = Map::new();
+    let env = curlyfries::variables::Variables::from_values(env.clone());
+    let session = curlyfries::variables::Variables::default();
     let scopes = Scopes {
         env_name: Some("dev"),
-        env,
+        env: &env,
         session: &session,
     };
     let resolved = execute::render_request(def, &scopes)?;
@@ -113,7 +114,10 @@ fn post_sends_typed_json_and_a_default_content_type() {
         r#"{"name":"Curlyfries","crewCapacity":42}"#
     );
     assert_eq!(sent.body_json()["crewCapacity"], json!(42));
-    assert_eq!(sent.header("user-agent"), Some("curlyfries/0.1.0"));
+    assert_eq!(
+        sent.header("user-agent"),
+        Some(concat!("curlyfries/", env!("CARGO_PKG_VERSION")))
+    );
 }
 
 #[test]
@@ -373,14 +377,15 @@ fn captures_cover_nested_paths_status_and_headers() {
         json!({
             "method": "GET",
             "path": "/ships/1",
-            "outputs": [
-                { "firstPirateName": "response.body.pirates[0].name" },
-                { "shipCount": "response.headers.x-total-count" },
-                { "status": "response.status" }
-            ]
+            "outputs": {
+                "firstPirateName": "response.body.pirates[0].name",
+                "shipCount": "response.headers.x-total-count",
+                "status": "response.status"
+            }
         }),
     );
-    let session = Map::new();
+    let env = curlyfries::variables::Variables::from_values(env);
+    let session = curlyfries::variables::Variables::default();
     let scopes = Scopes {
         env_name: Some("dev"),
         env: &env,
@@ -389,9 +394,12 @@ fn captures_cover_nested_paths_status_and_headers() {
     let resolved = execute::render_request(&request, &scopes).unwrap();
     let result = execute::execute(&execute::client(None), &resolved, None, false).unwrap();
     let captured = execute::capture(&request.outputs, &result, &request.file).unwrap();
-    assert_eq!(captured["firstPirateName"], json!("Mad Meg Hawkins"));
-    assert_eq!(captured["shipCount"], json!("5"));
-    assert_eq!(captured["status"], json!(200));
+    assert_eq!(
+        captured.get("firstPirateName"),
+        Some(&json!("Mad Meg Hawkins"))
+    );
+    assert_eq!(captured.get("shipCount"), Some(&json!("5")));
+    assert_eq!(captured.get("status"), Some(&json!(200)));
     let _ = server.finish();
 }
 
@@ -405,10 +413,11 @@ fn failed_captures_store_nothing() {
             "method": "POST",
             "path": "/ships",
             "body": {},
-            "outputs": [ { "shipId": "response.body.id" }, { "nope": "response.body.missing" } ]
+            "outputs": { "shipId": "response.body.id", "nope": "response.body.missing" }
         }),
     );
-    let session = Map::new();
+    let env = curlyfries::variables::Variables::from_values(env);
+    let session = curlyfries::variables::Variables::default();
     let scopes = Scopes {
         env_name: Some("dev"),
         env: &env,

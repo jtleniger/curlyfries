@@ -3,7 +3,7 @@
   "method": "POST",
   "path": "/auth/login",
   "body": "${admiral}",
-  "outputs": [
-    { "admiralToken": "response.body.access_token" }
-  ]
+  "outputs": {
+    "admiralToken": { "secret": true, "value": "response.body.access_token" }
+  }
 }

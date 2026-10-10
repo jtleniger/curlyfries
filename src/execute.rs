@@ -8,10 +8,11 @@ use ureq::http::{HeaderMap, HeaderName, HeaderValue, Method, Request};
 
 use crate::error::Error;
 use crate::expression::{self, ResponseView};
-use crate::request::{self, RequestDef};
+use crate::request::{self, Output, RequestDef};
 use crate::scopes::Scopes;
+use crate::template;
 use crate::template::RenderError;
-use crate::{Map, template};
+use crate::variables::Variables;
 
 /// A request with every template resolved and the URL fully built.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +83,24 @@ pub fn build_url(
     resolved_path: &str,
     scopes: &Scopes<'_>,
 ) -> Result<String, Error> {
+    join_url(
+        request_id,
+        def_file,
+        resolved_path,
+        scopes,
+        &scopes.lookup_fn(),
+    )
+}
+
+/// [`build_url`] against an explicit lookup, so the display render can mask a
+/// secret `baseUrl` too.
+fn join_url<F: Fn(&str) -> Option<Value>>(
+    request_id: &str,
+    def_file: &Path,
+    resolved_path: &str,
+    scopes: &Scopes<'_>,
+    lookup: &F,
+) -> Result<String, Error> {
     if resolved_path.starts_with("http://") || resolved_path.starts_with("https://") {
         return Ok(resolved_path.to_string());
     }
@@ -91,7 +110,7 @@ pub fn build_url(
         resolved: resolved_path.to_string(),
         env: scopes.env_name.map(|name| name.to_string()),
     };
-    let Some(Value::String(base)) = scopes.lookup("baseUrl") else {
+    let Some(Value::String(base)) = lookup("baseUrl") else {
         return Err(missing());
     };
     if base.trim().is_empty() {
@@ -106,10 +125,29 @@ pub fn build_url(
 
 /// Resolves every template in `def` into a ready-to-send request.
 pub fn render_request(def: &RequestDef, scopes: &Scopes<'_>) -> Result<ResolvedRequest, Error> {
-    let lookup = scopes.lookup_fn();
-    let path = render_string(def, "/path", &def.path, scopes)?;
-    let url = build_url(&def.id, &def.file, &path, scopes)?;
-    let name = render_string(def, "/name", &def.name, scopes)?;
+    render_with(def, scopes, &scopes.lookup_fn())
+}
+
+/// Resolves `def` for display: secret values render as [`SECRET_MASK`].
+///
+/// The result is only ever shown; secret values are still substituted for real
+/// by [`render_request`].
+pub fn render_request_display(
+    def: &RequestDef,
+    scopes: &Scopes<'_>,
+) -> Result<ResolvedRequest, Error> {
+    render_with(def, scopes, &scopes.display_lookup_fn())
+}
+
+/// Resolves every template in `def` using `lookup`.
+fn render_with<F: Fn(&str) -> Option<Value>>(
+    def: &RequestDef,
+    scopes: &Scopes<'_>,
+    lookup: &F,
+) -> Result<ResolvedRequest, Error> {
+    let path = render_string(def, "/path", &def.path, scopes, lookup)?;
+    let url = join_url(&def.id, &def.file, &path, scopes, lookup)?;
+    let name = render_string(def, "/name", &def.name, scopes, lookup)?;
     if name.is_empty() {
         return Err(Error::Schema {
             path: def.file.clone(),
@@ -120,11 +158,11 @@ pub fn render_request(def: &RequestDef, scopes: &Scopes<'_>) -> Result<ResolvedR
 
     let mut headers = Vec::with_capacity(def.headers.len() + 1);
     for (key, value) in &def.headers {
-        let pointer = format!("/headers/{}", request::pointer_token(key));
+        let pointer = format!("/headers/{}", crate::variables::pointer_token(key));
         let name = template::parse(key)
             .map_err(|problem| request::template_error(&def.file, &pointer, problem, key))?;
         let name = name
-            .render_string(&lookup)
+            .render_string(lookup)
             .map_err(|error| render_failure(def, &pointer, key, scopes, error))?;
         if name.is_empty() {
             return Err(Error::Schema {
@@ -133,7 +171,7 @@ pub fn render_request(def: &RequestDef, scopes: &Scopes<'_>) -> Result<ResolvedR
                 message: format!("header name `{key}` rendered to an empty string"),
             });
         }
-        let value = render_string(def, &pointer, value, scopes)?;
+        let value = render_string(def, &pointer, value, scopes, lookup)?;
         headers.push((name, value));
     }
 
@@ -145,7 +183,7 @@ pub fn render_request(def: &RequestDef, scopes: &Scopes<'_>) -> Result<ResolvedR
                 Value::String(text) => text.clone(),
                 other => other.to_string(),
             };
-            let rendered = template::render_tree(value, &lookup)
+            let rendered = template::render_tree(value, lookup)
                 .map_err(|error| render_failure(def, "/body", &raw, scopes, error))?;
             Some(serde_json::to_string(&rendered).expect("JSON values always serialize"))
         }
@@ -170,17 +208,17 @@ pub fn render_request(def: &RequestDef, scopes: &Scopes<'_>) -> Result<ResolvedR
 }
 
 /// Renders one string slot of a request.
-fn render_string(
+fn render_string<F: Fn(&str) -> Option<Value>>(
     def: &RequestDef,
     pointer: &str,
     raw: &str,
     scopes: &Scopes<'_>,
+    lookup: &F,
 ) -> Result<String, Error> {
     let parsed = template::parse(raw)
         .map_err(|problem| request::template_error(&def.file, pointer, problem, raw))?;
-    let lookup = scopes.lookup_fn();
     parsed
-        .render_string(&lookup)
+        .render_string(lookup)
         .map_err(|error| render_failure(def, pointer, raw, scopes, error))
 }
 
@@ -504,28 +542,24 @@ fn describe(error: ureq::Error) -> String {
 
 /// Evaluates every `outputs` expression. Nothing is returned unless all of them
 /// succeed, so a failed capture stores no variables at all.
-pub fn capture(
-    outputs: &[(String, String)],
-    res: &ExecResult,
-    def_file: &Path,
-) -> Result<Map, Error> {
+pub fn capture(outputs: &[Output], res: &ExecResult, def_file: &Path) -> Result<Variables, Error> {
     let view = ResponseView {
         status: res.status,
         headers: &res.header_map,
         body_text: &res.body_text,
         body_json: res.body_json.as_ref(),
     };
-    let mut captured = Map::new();
-    for (key, source) in outputs {
+    let mut captured = Variables::default();
+    for output in outputs {
         let failed = |reason: String| Error::Output {
             path: def_file.to_path_buf(),
-            key: key.clone(),
-            expression: source.clone(),
+            key: output.name.clone(),
+            expression: output.expression.clone(),
             reason,
         };
-        let expr = expression::parse(source).map_err(failed)?;
+        let expr = expression::parse(&output.expression).map_err(failed)?;
         let value = expression::evaluate(&expr, &view).map_err(failed)?;
-        captured.insert(key.clone(), value);
+        captured.insert(output.name.clone(), value, output.secret);
     }
     Ok(captured)
 }
@@ -533,9 +567,11 @@ pub fn capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Map;
+    use crate::variables::SECRET_MASK;
     use serde_json::json;
 
-    fn scopes_of<'a>(env: &'a Map, session: &'a Map) -> Scopes<'a> {
+    fn scopes_of<'a>(env: &'a Variables, session: &'a Variables) -> Scopes<'a> {
         Scopes {
             env_name: Some("dev"),
             env,
@@ -550,10 +586,14 @@ mod tests {
             .collect()
     }
 
+    fn vars(pairs: &[(&str, Value)]) -> Variables {
+        Variables::from_values(map(pairs))
+    }
+
     #[test]
     fn absolute_paths_pass_through() {
-        let env = map(&[("baseUrl", json!("http://127.0.0.1:1"))]);
-        let empty = Map::new();
+        let env = vars(&[("baseUrl", json!("http://127.0.0.1:1"))]);
+        let empty = Variables::default();
         let scopes = scopes_of(&env, &empty);
         assert_eq!(
             build_url(
@@ -569,14 +609,14 @@ mod tests {
 
     #[test]
     fn base_url_is_joined_without_double_slashes() {
-        let empty = Map::new();
-        let env = map(&[("baseUrl", json!("http://host:4000/"))]);
+        let empty = Variables::default();
+        let env = vars(&[("baseUrl", json!("http://host:4000/"))]);
         let scopes = scopes_of(&env, &empty);
         assert_eq!(
             build_url("x", Path::new("requests/x.json"), "/ships?limit=2", &scopes).unwrap(),
             "http://host:4000/ships?limit=2"
         );
-        let env = map(&[("baseUrl", json!("http://host:4000"))]);
+        let env = vars(&[("baseUrl", json!("http://host:4000"))]);
         let scopes = scopes_of(&env, &empty);
         assert_eq!(
             build_url("x", Path::new("requests/x.json"), "ships", &scopes).unwrap(),
@@ -590,7 +630,7 @@ mod tests {
 
     #[test]
     fn missing_base_url_names_the_environment() {
-        let empty = Map::new();
+        let empty = Variables::default();
         let scopes = scopes_of(&empty, &empty);
         let err = build_url(
             "ships/list",
@@ -608,10 +648,10 @@ mod tests {
         assert!(text.contains("environments/dev.json"), "{text}");
         assert_eq!(err.exit_code(), 3);
 
-        let null_base = map(&[("baseUrl", json!(null))]);
+        let null_base = vars(&[("baseUrl", json!(null))]);
         let scopes = scopes_of(&null_base, &empty);
         assert!(build_url("x", Path::new("requests/x.json"), "/ships", &scopes).is_err());
-        let empty_base = map(&[("baseUrl", json!(""))]);
+        let empty_base = vars(&[("baseUrl", json!(""))]);
         let scopes = scopes_of(&empty_base, &empty);
         assert!(build_url("x", Path::new("requests/x.json"), "/ships", &scopes).is_err());
     }
@@ -626,17 +666,17 @@ mod tests {
                 "path": "/ships?limit=${limit}",
                 "headers": { "Authorization": "Bearer ${token}", "X-Num": "${limit}" },
                 "body": { "capacity": "${limit}", "label": "${empty}" },
-                "outputs": [ { "id": "response.body.id" } ]
+                "outputs": { "id": "response.body.id" }
             }),
         )
         .unwrap();
-        let env = map(&[
+        let env = vars(&[
             ("baseUrl", json!("http://host:4000")),
             ("limit", json!(42)),
             ("token", json!("abc")),
             ("empty", json!("")),
         ]);
-        let empty = Map::new();
+        let empty = Variables::default();
         let scopes = scopes_of(&env, &empty);
         let resolved = render_request(&def, &scopes).unwrap();
         assert_eq!(resolved.url, "http://host:4000/ships?limit=42");
@@ -668,7 +708,7 @@ mod tests {
             }),
         )
         .unwrap();
-        let empty = Map::new();
+        let empty = Variables::default();
         let scopes = scopes_of(&empty, &empty);
         let resolved = render_request(&def, &scopes).unwrap();
         assert_eq!(resolved.body.as_deref(), Some("\"hello\""));
@@ -691,8 +731,8 @@ mod tests {
             }),
         )
         .unwrap();
-        let env = map(&[("baseUrl", json!("http://host")), ("apiKey", json!("k"))]);
-        let empty = Map::new();
+        let env = vars(&[("baseUrl", json!("http://host")), ("apiKey", json!("k"))]);
+        let empty = Variables::default();
         let scopes = scopes_of(&env, &empty);
 
         let err = render_request(&def, &scopes).unwrap_err();
@@ -710,7 +750,7 @@ mod tests {
             other => panic!("wrong error: {other}"),
         }
 
-        let session = map(&[("token", json!("abc"))]);
+        let session = vars(&[("token", json!("abc"))]);
         let scopes = scopes_of(&env, &session);
         let err = render_request(&def, &scopes).unwrap_err();
         match &err {
@@ -730,8 +770,8 @@ mod tests {
             &json!({ "method": "POST", "path": "/auth/login", "body": "${pirate}" }),
         )
         .unwrap();
-        let env = map(&[("baseUrl", json!("http://host"))]);
-        let empty = Map::new();
+        let env = vars(&[("baseUrl", json!("http://host"))]);
+        let empty = Variables::default();
         let scopes = scopes_of(&env, &empty);
         let err = render_request(&def, &scopes).unwrap_err();
         let text = err.to_string();
@@ -747,8 +787,8 @@ mod tests {
             &json!({ "method": "GET", "path": "/ships/${limit}" }),
         )
         .unwrap();
-        let env = map(&[("baseUrl", json!("http://host")), ("limit", json!(null))]);
-        let empty = Map::new();
+        let env = vars(&[("baseUrl", json!("http://host")), ("limit", json!(null))]);
+        let empty = Variables::default();
         let scopes = scopes_of(&env, &empty);
         let err = render_request(&def, &scopes).unwrap_err();
         assert!(
@@ -776,13 +816,26 @@ mod tests {
         let def_file = Path::new("requests/ships/create.json");
         let captured = capture(
             &[
-                ("shipId".to_string(), "response.body.id".to_string()),
-                ("shipName".to_string(), "response.body.name".to_string()),
-                (
-                    "deep".to_string(),
-                    "response.body.nested.deep[0].v".to_string(),
-                ),
-                ("status".to_string(), "response.status".to_string()),
+                Output {
+                    name: "shipId".to_string(),
+                    expression: "response.body.id".to_string(),
+                    secret: false,
+                },
+                Output {
+                    name: "shipName".to_string(),
+                    expression: "response.body.name".to_string(),
+                    secret: false,
+                },
+                Output {
+                    name: "deep".to_string(),
+                    expression: "response.body.nested.deep[0].v".to_string(),
+                    secret: false,
+                },
+                Output {
+                    name: "status".to_string(),
+                    expression: "response.status".to_string(),
+                    secret: false,
+                },
             ],
             &res,
             def_file,
@@ -790,18 +843,26 @@ mod tests {
         .unwrap();
         assert_eq!(
             captured,
-            map(&[
+            Variables::from_values(map(&[
                 ("shipId", json!(6)),
                 ("shipName", json!("Curlyfries")),
                 ("deep", json!(1)),
                 ("status", json!(201)),
-            ])
+            ]))
         );
 
         let err = capture(
             &[
-                ("ok".to_string(), "response.body.id".to_string()),
-                ("bad".to_string(), "response.body.missing".to_string()),
+                Output {
+                    name: "ok".to_string(),
+                    expression: "response.body.id".to_string(),
+                    secret: false,
+                },
+                Output {
+                    name: "bad".to_string(),
+                    expression: "response.body.missing".to_string(),
+                    secret: false,
+                },
             ],
             &res,
             def_file,
@@ -843,18 +904,23 @@ mod tests {
             unfollowed_redirect: None,
         };
         let captured = capture(
-            &[(
-                "count".to_string(),
-                "response.headers.x-total-count".to_string(),
-            )],
+            &[Output {
+                name: "count".to_string(),
+                expression: "response.headers.x-total-count".to_string(),
+                secret: false,
+            }],
             &res,
             Path::new("requests/ships/list.json"),
         )
         .unwrap();
-        assert_eq!(captured["count"], json!("5"));
+        assert_eq!(captured.get("count"), Some(&json!("5")));
 
         let err = capture(
-            &[("body".to_string(), "response.body.x".to_string())],
+            &[Output {
+                name: "body".to_string(),
+                expression: "response.body.x".to_string(),
+                secret: false,
+            }],
             &res,
             Path::new("requests/ships/list.json"),
         )
@@ -862,6 +928,122 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("response body is not JSON"), "{text}");
         assert!(text.contains("content-type: (none)"), "{text}");
+    }
+
+    #[test]
+    fn capture_marks_secret_outputs() {
+        let res = ExecResult {
+            status: 200,
+            reason: "OK".to_string(),
+            headers: Vec::new(),
+            header_map: HeaderMap::new(),
+            body_text: r#"{"access_token":"tok-123","role":"admin"}"#.to_string(),
+            body_json: serde_json::from_str(r#"{"access_token":"tok-123","role":"admin"}"#).ok(),
+            duration_ms: 1,
+            final_url: String::new(),
+            unfollowed_redirect: None,
+        };
+        let captured = capture(
+            &[
+                Output {
+                    name: "token".to_string(),
+                    expression: "response.body.access_token".to_string(),
+                    secret: true,
+                },
+                Output {
+                    name: "role".to_string(),
+                    expression: "response.body.role".to_string(),
+                    secret: false,
+                },
+            ],
+            &res,
+            Path::new("requests/auth/login.json"),
+        )
+        .unwrap();
+        assert_eq!(captured.get("token"), Some(&json!("tok-123")));
+        assert!(captured.is_secret("token"));
+        assert!(!captured.is_secret("role"));
+        assert_eq!(captured.secrets.len(), 1);
+    }
+
+    #[test]
+    fn display_rendering_masks_secret_values() {
+        let def = request::validate(
+            "ships/list",
+            Path::new("requests/ships/list.json"),
+            &json!({
+                "method": "GET",
+                "path": "/ships?key=${apiKey}",
+                "headers": { "Authorization": "Bearer ${token}" },
+                "body": { "secret": "${token}", "plain": "${limit}" }
+            }),
+        )
+        .unwrap();
+        let mut env = vars(&[("baseUrl", json!("http://host")), ("limit", json!(2))]);
+        env.insert("token".to_string(), json!("abc"), true);
+        env.insert("apiKey".to_string(), json!("k-9"), true);
+        let empty = Variables::default();
+        let scopes = scopes_of(&env, &empty);
+
+        // The real render sends the values untouched.
+        let real = render_request(&def, &scopes).unwrap();
+        assert_eq!(real.url, "http://host/ships?key=k-9");
+        assert_eq!(real.headers[0].1, "Bearer abc");
+        assert_eq!(real.body.as_deref(), Some(r#"{"secret":"abc","plain":2}"#));
+
+        // The display render masks every secret, in URL, headers and body.
+        let display = render_request_display(&def, &scopes).unwrap();
+        assert_eq!(display.url, format!("http://host/ships?key={SECRET_MASK}"));
+        assert_eq!(display.headers[0].1, format!("Bearer {SECRET_MASK}"));
+        assert_eq!(
+            display.body.as_deref(),
+            Some(format!(r#"{{"secret":"{SECRET_MASK}","plain":2}}"#).as_str())
+        );
+    }
+
+    #[test]
+    fn display_rendering_masks_a_secret_base_url_only() {
+        let def = request::validate(
+            "x",
+            Path::new("requests/x.json"),
+            &json!({ "method": "GET", "path": "/x" }),
+        )
+        .unwrap();
+        let mut env = vars(&[("limit", json!(2))]);
+        env.insert("baseUrl".to_string(), json!("http://secret-host"), true);
+        let empty = Variables::default();
+        let scopes = scopes_of(&env, &empty);
+
+        assert_eq!(
+            render_request(&def, &scopes).unwrap().url,
+            "http://secret-host/x"
+        );
+        assert_eq!(
+            render_request_display(&def, &scopes).unwrap().url,
+            format!("{SECRET_MASK}/x")
+        );
+    }
+
+    #[test]
+    fn display_rendering_leaves_non_secrets_alone() {
+        let def = request::validate(
+            "x",
+            Path::new("requests/x.json"),
+            &json!({
+                "method": "POST",
+                "path": "/x?limit=${limit}",
+                "headers": { "X-Num": "${limit}" },
+                "body": { "n": "${limit}" }
+            }),
+        )
+        .unwrap();
+        let env = vars(&[("baseUrl", json!("http://host")), ("limit", json!(7))]);
+        let empty = Variables::default();
+        let scopes = scopes_of(&env, &empty);
+        assert_eq!(
+            render_request(&def, &scopes).unwrap(),
+            render_request_display(&def, &scopes).unwrap()
+        );
     }
 
     #[test]

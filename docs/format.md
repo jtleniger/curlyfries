@@ -41,10 +41,10 @@ Ids are listed in sorted order.
     "class": "frigate",
     "crewCapacity": "${random.int.1.500}"
   },
-  "outputs": [
-    { "shipId": "response.body.id" },
-    { "shipName": "response.body.name" }
-  ]
+  "outputs": {
+    "shipId": "response.body.id",
+    "shipName": "response.body.name"
+  }
 }
 ```
 
@@ -55,7 +55,7 @@ Ids are listed in sorted order.
 | `path` | string | yes | may be templated. If, after templating, it starts with `http://` or `https://` it is used verbatim, otherwise it is joined to the `baseUrl` variable. |
 | `headers` | object of string → string | no | names and values may be templated. Order is preserved. |
 | `body` | any JSON | no | templated recursively, object keys included, then serialised compactly. `"body": null` means *no body*. A body without a `Content-Type` header gains `Content-Type: application/json`. |
-| `outputs` | array of one-entry objects | no | each element is `{ "<name>": "<expression>" }`; order is preserved and duplicate names are an error. |
+| `outputs` | object of name → expression | no | the value is the expression string, or `{ "secret": true, "value": "<expression>" }` to keep the capture out of the UI. Order is file order; keys are unique by construction. |
 
 Unknown keys are rejected with the allowed list, e.g.
 
@@ -189,6 +189,12 @@ response arrives. A failed output means the whole capture is refused: no
 variable from that request is stored, and the UI shows the failure in its own
 **Output error** section.
 
+An `outputs` entry may be wrapped as `{ "secret": true, "value": "<expression>" }`
+to mark the *captured value* secret, so a token is stored and usable but never
+echoed (see [Secret values](#secret-values)). A wrapper holding exactly
+`secret` and `value` is required; `secret: false` is allowed and behaves like the
+bare form.
+
 ## Environments
 
 Environment files live in `environmentsDir` and are named `<name>.json`. The
@@ -199,14 +205,24 @@ naming the file. Files that are not `*.json` and dot-files are ignored.
 {
   "baseUrl": "http://127.0.0.1:4000",
   "limit": 2,
-  "pirate": { "username": "silver", "password": "piecesof8" }
+  "pirate": { "secret": true, "value": { "username": "silver", "password": "piecesof8" } }
 }
 ```
 
 The document must be a JSON object; every entry becomes a variable and may hold
-any JSON type. Values are **literal**: environment files are never templated, so
-resolution stays one pass with no cycles. A derived value belongs in the
-environment file, in a request, or in a capture.
+any JSON type. An entry is written either as the value itself, or as a **secret
+wrapper** `{ "secret": true, "value": <any JSON> }`: the value is unwrapped and
+used exactly as if written bare, but the terminal UI never echoes it (see
+[Secret values](#secret-values)). The rule is blunt and positional — **an object
+with a top-level `secret` key is a wrapper, never a literal value** — so a
+literal object value must not carry a top-level `secret` key. A wrapper must hold
+exactly two keys, `secret` (a boolean) and `value`; anything else is a schema
+error naming the offending key by JSON pointer, e.g.
+`unknown key `password` in a secret value (allowed: secret, value)`.
+
+Values are **literal**: environment files are never templated, so resolution
+stays one pass with no cycles. A derived value belongs in the environment file,
+in a request, or in a capture.
 
 Which environment is used:
 
@@ -233,16 +249,36 @@ error: undefined variable `token` in requests/auth/me.json
          session           → (none)
 ```
 
+## Secret values
+
+A secret is display-only. The value is substituted, sent and persisted exactly
+like any other; only the UI withholds it, printing the fixed mask `••••••` in its
+place. Secrets come from two places:
+
+- an environment entry wrapped as `{ "secret": true, "value": … }`; and
+- an `outputs` entry wrapped the same way, which makes the *captured* value
+  secret.
+
+In the resolved request pane every slot is rendered through the mask, so a
+secret base URL, path segment, header or body value shows as `••••••` there; the
+**definition** pane shows the request file as written, and the response pane is
+server data and is never masked. In the captures strip a secret capture prints as
+`name = ••••••`. When a session capture and an environment entry share a name,
+the session capture wins — including its secret flag.
+
 ## Session file
 
 Captured variables are persisted in `<root>/.curlyfries/session.json`:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "updatedAtUnix": 1759276800,
   "varScopes": {
-    "dev": { "token": "eyJ…", "shipId": 6 }
+    "dev": {
+      "token": { "secret": true, "value": "eyJ…" },
+      "shipId": 6
+    }
   }
 }
 ```
@@ -250,14 +286,18 @@ Captured variables are persisted in `<root>/.curlyfries/session.json`:
 - Scope keys are environment names, or `(none)` when no environment is selected.
   `(none)` cannot collide with an environment because parentheses are not valid
   in an environment name.
-- `version` must be `1`, `updatedAtUnix` is a Unix epoch second and every
+- A **secret capture** is written in the same `{ "secret": true, "value": … }`
+  wrapper as an environment entry; a plain capture is written bare. Secret
+  captures are stored in plaintext, so a chain that uses a captured token still
+  resolves after a restart.
+- `version` must be `2`, `updatedAtUnix` is a Unix epoch second and every
   `varScopes` value must be an object. Unknown keys, an unknown version and
   malformed values are errors — never silent discards — that suggest clearing
   the captures from the UI:
 
 ```
 error: unreadable session file .curlyfries/session.json
-  reason: unsupported version 2 (expected 1)
+  reason: unsupported version 1 (expected 2)
   hint:  delete the file, or press x in the terminal UI to clear the captures
 ```
 
@@ -284,8 +324,8 @@ error: unreadable session file .curlyfries/session.json
 
 | request | what it shows |
 |---|---|
-| `auth/login` | `body: "${pirate}"` (a whole-placeholder object) and capturing `token`, `role` |
-| `auth/login-admiral` | a second login capturing `admiralToken` for the admiral-only routes |
+| `auth/login` | `body: "${pirate}"` (a whole-placeholder object, and a secret environment value) and capturing `token` (secret) and `role` |
+| `auth/login-admiral` | a second login capturing `admiralToken` (secret) for the admiral-only routes |
 | `auth/me` | `Authorization: Bearer ${token}` resolved from the session |
 | `ships/list` | `limit=${limit}` from the environment plus a header capture (`shipCount`) |
 | `ships/detail` | nested capture `response.body.pirates[0].name` |

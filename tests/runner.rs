@@ -13,7 +13,7 @@ const LOGIN: &str = r#"{
   "method": "POST",
   "path": "/auth/login",
   "body": { "username": "silver", "password": "piecesof8" },
-  "outputs": [ { "token": "response.body.access_token" } ]
+  "outputs": { "token": { "secret": true, "value": "response.body.access_token" } }
 }"#;
 
 #[test]
@@ -36,13 +36,19 @@ fn capture_lands_in_the_environment_scope_and_is_persisted() {
 
     let mut runner = runner(&project, &entries, &mut session, env_name, env);
     let outcome = runner.execute_id("auth/login.json").unwrap();
-    assert_eq!(outcome.captured["token"], json!("tok-123"));
+    assert_eq!(outcome.captured.get("token"), Some(&json!("tok-123")));
+    assert!(outcome.captured.is_secret("token"));
     assert_eq!(outcome.request.name, "Log in");
     assert!(runner.warnings.is_empty());
     assert_eq!(runner.session.vars("dev")["token"], json!("tok-123"));
+    assert!(runner.session.variables("dev").is_secret("token"));
 
     let reloaded = Session::load(&project.root).unwrap();
     assert_eq!(reloaded.vars("dev")["token"], json!("tok-123"));
+    assert_eq!(
+        reloaded.variables("dev").secrets,
+        ["token".to_string()].into_iter().collect()
+    );
     let _ = server.finish();
 }
 

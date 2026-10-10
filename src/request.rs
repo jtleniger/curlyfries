@@ -6,13 +6,24 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::error::{Error, TemplateProblem};
-use crate::{Map, expression, template};
+use crate::{Map, expression, template, variables};
 
 /// Keys allowed at the top level of a request file.
 pub const ALLOWED_KEYS: [&str; 6] = ["body", "headers", "method", "name", "outputs", "path"];
 
 /// Methods a request may use, in the order they are listed in errors.
 pub const METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+
+/// One captured variable: the expression to evaluate and whether its result is secret.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Output {
+    /// Variable name captured into the scope.
+    pub name: String,
+    /// Expression evaluated against the response.
+    pub expression: String,
+    /// Whether the captured value must not be echoed in the UI.
+    pub secret: bool,
+}
 
 /// A validated request definition, with templates left unevaluated.
 #[derive(Debug, Clone, PartialEq)]
@@ -31,8 +42,8 @@ pub struct RequestDef {
     pub headers: Vec<(String, String)>,
     /// Raw (possibly templated) body, `None` when absent or `null`.
     pub body: Option<Value>,
-    /// Ordered `(variable, expression)` pairs.
-    pub outputs: Vec<(String, String)>,
+    /// Captured variables, in file order.
+    pub outputs: Vec<Output>,
 }
 
 /// Reads and validates the request file `file` as request id `id`.
@@ -67,7 +78,7 @@ pub fn validate(id: &str, file: &Path, value: &Value) -> Result<RequestDef, Erro
     unknown.sort_unstable();
     if let Some(key) = unknown.first() {
         return Err(schema(
-            &format!("/{}", pointer_token(key)),
+            &format!("/{}", variables::pointer_token(key)),
             format!("unknown key `{key}` (allowed: {})", ALLOWED_KEYS.join(", ")),
         ));
     }
@@ -105,7 +116,7 @@ pub fn validate(id: &str, file: &Path, value: &Value) -> Result<RequestDef, Erro
         for (key, value) in header_map {
             let Some(value) = value.as_str() else {
                 return Err(schema(
-                    &format!("/headers/{}", pointer_token(key)),
+                    &format!("/headers/{}", variables::pointer_token(key)),
                     format!("`headers.{key}` must be a string"),
                 ));
             };
@@ -118,40 +129,30 @@ pub fn validate(id: &str, file: &Path, value: &Value) -> Result<RequestDef, Erro
         Some(value) => Some(value.clone()),
     };
 
-    let mut outputs: Vec<(String, String)> = Vec::new();
+    let mut outputs: Vec<Output> = Vec::new();
     if let Some(value) = map.get("outputs") {
-        let Value::Array(items) = value else {
-            return Err(schema("/outputs", "`outputs` must be an array".to_string()));
+        let Value::Object(items) = value else {
+            return Err(schema(
+                "/outputs",
+                "`outputs` must be an object".to_string(),
+            ));
         };
-        for (index, item) in items.iter().enumerate() {
-            let Value::Object(entry) = item else {
+        for (name, entry) in items {
+            let pointer = format!("/outputs/{}", variables::pointer_token(name));
+            let (raw, secret) = variables::split_entry(&pointer, entry)
+                .map_err(|p| schema(&p.pointer, p.message))?;
+            let Some(source) = raw.as_str() else {
                 return Err(schema(
-                    &format!("/outputs/{index}"),
-                    "each `outputs` entry must be an object with exactly one key".to_string(),
-                ));
-            };
-            if entry.len() != 1 {
-                return Err(schema(
-                    &format!("/outputs/{index}"),
-                    format!(
-                        "each `outputs` entry must have exactly one key, found {}",
-                        entry.len()
-                    ),
-                ));
-            }
-            let (key, expression_src) = entry.iter().next().expect("one entry");
-            let Some(expression_src) = expression_src.as_str() else {
-                return Err(schema(
-                    &format!("/outputs/{index}/{}", pointer_token(key)),
+                    &pointer,
                     "output expression must be a string".to_string(),
                 ));
             };
-            if outputs.iter().any(|(existing, _)| existing == key) {
-                return Err(schema("/outputs", format!("duplicate output name `{key}`")));
-            }
-            let pointer = format!("/outputs/{index}/{}", pointer_token(key));
-            expression::parse(expression_src).map_err(|reason| schema(&pointer, reason))?;
-            outputs.push((key.clone(), expression_src.to_string()));
+            expression::parse(source).map_err(|reason| schema(&pointer, reason))?;
+            outputs.push(Output {
+                name: name.clone(),
+                expression: source.to_string(),
+                secret,
+            });
         }
     }
 
@@ -169,8 +170,16 @@ pub fn validate(id: &str, file: &Path, value: &Value) -> Result<RequestDef, Erro
     check_template(file, "/path", &def.path)?;
     check_template(file, "/name", &def.name)?;
     for (key, value) in &def.headers {
-        check_template(file, &format!("/headers/{}", pointer_token(key)), key)?;
-        check_template(file, &format!("/headers/{}", pointer_token(key)), value)?;
+        check_template(
+            file,
+            &format!("/headers/{}", variables::pointer_token(key)),
+            key,
+        )?;
+        check_template(
+            file,
+            &format!("/headers/{}", variables::pointer_token(key)),
+            value,
+        )?;
     }
     if let Some(body) = &def.body {
         check_templates_in_tree(file, "/body", body)?;
@@ -191,11 +200,6 @@ fn required_string(file: &Path, map: &Map, key: &str) -> Result<String, Error> {
     }
 }
 
-/// Escapes a JSON pointer token (`~` → `~0`, `/` → `~1`).
-pub fn pointer_token(token: &str) -> String {
-    token.replace('~', "~0").replace('/', "~1")
-}
-
 fn check_template(file: &Path, pointer: &str, text: &str) -> Result<(), Error> {
     template::parse(text)
         .map(|_| ())
@@ -213,7 +217,7 @@ fn check_templates_in_tree(file: &Path, pointer: &str, value: &Value) -> Result<
         Value::String(text) => check_template(file, pointer, text),
         Value::Object(map) => {
             for (key, child) in map {
-                let child_pointer = format!("{pointer}/{}", pointer_token(key));
+                let child_pointer = format!("{pointer}/{}", variables::pointer_token(key));
                 check_template(file, &child_pointer, key)?;
                 check_templates_in_tree(file, &child_pointer, child)?;
             }
@@ -242,6 +246,7 @@ pub fn template_error(file: &Path, pointer: &str, problem: TemplateProblem, valu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::variables::pointer_token;
     use serde_json::json;
 
     fn load(id: &str, text: &str) -> Result<RequestDef, Error> {
@@ -279,7 +284,7 @@ mod tests {
               "path": "/ships",
               "headers": { "Authorization": "Bearer ${token}", "X-Trace": "curlyfries" },
               "body": { "name": "${shipName}", "typed": 42 },
-              "outputs": [ { "shipId": "response.body.id" }, { "shipName": "response.body.name" } ]
+              "outputs": { "shipId": "response.body.id", "shipName": "response.body.name" }
             }"#,
         )
         .unwrap();
@@ -298,8 +303,54 @@ mod tests {
         assert_eq!(
             def.outputs,
             vec![
-                ("shipId".to_string(), "response.body.id".to_string()),
-                ("shipName".to_string(), "response.body.name".to_string()),
+                Output {
+                    name: "shipId".to_string(),
+                    expression: "response.body.id".to_string(),
+                    secret: false,
+                },
+                Output {
+                    name: "shipName".to_string(),
+                    expression: "response.body.name".to_string(),
+                    secret: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn outputs_preserve_file_order_and_the_secret_flag() {
+        let def = load(
+            "auth/login",
+            r#"{
+              "method": "POST",
+              "path": "/auth/login",
+              "outputs": {
+                "token": { "secret": true, "value": "response.body.access_token" },
+                "role": "response.body.user.role",
+                "plain": { "secret": false, "value": "response.status" }
+              }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            def.outputs,
+            vec![
+                Output {
+                    name: "token".to_string(),
+                    expression: "response.body.access_token".to_string(),
+                    secret: true,
+                },
+                Output {
+                    name: "role".to_string(),
+                    expression: "response.body.user.role".to_string(),
+                    secret: false,
+                },
+                Output {
+                    name: "plain".to_string(),
+                    // A `secret: false` wrapper is unwrapped too.
+                    expression: "response.status".to_string(),
+                    secret: false,
+                },
             ]
         );
     }
@@ -362,41 +413,33 @@ mod tests {
             )
             .contains("`headers.A` must be a string")
         );
-        assert!(
-            reason(&load("x", r#"{ "method": "GET", "path": "/x", "outputs": {} }"#).unwrap_err())
-                .contains("`outputs` must be an array")
-        );
-        assert!(
-            reason(
-                &load(
-                    "x",
-                    r#"{ "method": "GET", "path": "/x", "outputs": ["a"] }"#
-                )
-                .unwrap_err()
-            )
-            .contains("must be an object with exactly one key")
-        );
-        assert!(
-            reason(
-                &load(
-                    "x",
-                    r#"{ "method": "GET", "path": "/x", "outputs": [{ "a": 1, "b": 2 }] }"#
-                )
-                .unwrap_err()
-            )
-            .contains("exactly one key, found 2")
-        );
+        // `outputs` is an object keyed by capture name; anything else is refused.
+        for text in [
+            r#"{ "method": "GET", "path": "/x", "outputs": [] }"#,
+            r#"{ "method": "GET", "path": "/x", "outputs": null }"#,
+            r#"{ "method": "GET", "path": "/x", "outputs": ["a"] }"#,
+        ] {
+            let err = load("x", text).unwrap_err();
+            match &err {
+                Error::Schema {
+                    pointer, message, ..
+                } => {
+                    assert_eq!(pointer, "/outputs", "{text}");
+                    assert_eq!(message, "`outputs` must be an object", "{text}");
+                }
+                other => panic!("wrong error for {text}: {other}"),
+            }
+        }
         assert!(
             reason(
                 &load(
                     "x",
-                    r#"{ "method": "GET", "path": "/x", "outputs": [{ "a": 1 }] }"#
+                    r#"{ "method": "GET", "path": "/x", "outputs": { "a": 1 } }"#
                 )
                 .unwrap_err()
             )
             .contains("output expression must be a string")
         );
-        assert!(reason(&load("x", r#"{ "method": "GET", "path": "/x", "outputs": [{ "a": "response.body" }, { "a": "response.status" }] }"#).unwrap_err()).contains("duplicate output name `a`"));
         assert!(
             reason(&load("x", r#"{ "method": "GET", "path": "/x", "name": 3 }"#).unwrap_err())
                 .contains("`name` must be a string")
@@ -432,14 +475,14 @@ mod tests {
 
         let bad_expression = load(
             "x",
-            r#"{ "method": "GET", "path": "/x", "outputs": [ { "id": "response.nope" } ] }"#,
+            r#"{ "method": "GET", "path": "/x", "outputs": { "id": "response.nope" } }"#,
         )
         .unwrap_err();
         match &bad_expression {
             Error::Schema {
                 pointer, message, ..
             } => {
-                assert_eq!(pointer, "/outputs/0/id");
+                assert_eq!(pointer, "/outputs/id");
                 assert!(message.contains("unknown response member"), "{message}");
             }
             other => panic!("wrong error: {other}"),

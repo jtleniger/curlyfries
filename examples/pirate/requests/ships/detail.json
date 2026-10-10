@@ -2,7 +2,7 @@
   "name": "Ship detail with crew and cargo",
   "method": "GET",
   "path": "/ships/1?expand=pirates,treasures",
-  "outputs": [
-    { "firstPirateName": "response.body.pirates[0].name" }
-  ]
+  "outputs": {
+    "firstPirateName": "response.body.pirates[0].name"
+  }
 }

@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use serde_json::Value;
 
 use crate::request::RequestDef;
+use crate::variables::SECRET_MASK;
 
 /// How long a captured string may be before it is truncated.
 const CAPTURE_LIMIT: usize = 60;
@@ -38,8 +39,12 @@ pub fn compact(value: &Value) -> String {
     serde_json::to_string(value).expect("JSON values always serialize")
 }
 
-/// A captured value as printed: compact JSON, strings truncated.
-pub fn captured_value(value: &Value) -> String {
+/// A captured value as printed: the mask when secret, else compact JSON with
+/// strings truncated.
+pub fn captured_value(value: &Value, secret: bool) -> String {
+    if secret {
+        return SECRET_MASK.to_string();
+    }
     match value {
         Value::String(text) => {
             let mut chars = text.chars();
@@ -117,20 +122,27 @@ mod tests {
 
     #[test]
     fn captured_values_are_compact_json() {
-        assert_eq!(captured_value(&json!({ "a": 1 })), "{\"a\":1}");
-        assert_eq!(captured_value(&json!(7)), "7");
+        assert_eq!(captured_value(&json!({ "a": 1 }), false), "{\"a\":1}");
+        assert_eq!(captured_value(&json!(7), false), "7");
         // Exactly at the limit stays untouched; one more character truncates.
         let at_limit: String = "e".repeat(CAPTURE_LIMIT);
         assert_eq!(
-            captured_value(&json!(at_limit.clone())),
+            captured_value(&json!(at_limit.clone()), false),
             compact(&json!(at_limit))
         );
         let over: String = "e".repeat(CAPTURE_LIMIT + 1);
         let mut expected = "e".repeat(CAPTURE_LIMIT);
         expected.push('…');
         assert_eq!(
-            captured_value(&json!(over)),
+            captured_value(&json!(over), false),
             compact(&Value::String(expected))
         );
+    }
+
+    #[test]
+    fn a_secret_value_is_masked_whatever_its_type() {
+        assert_eq!(captured_value(&json!("s3cret"), true), SECRET_MASK);
+        assert_eq!(captured_value(&json!({ "a": 1 }), true), SECRET_MASK);
+        assert_eq!(captured_value(&json!(null), true), SECRET_MASK);
     }
 }

@@ -2,7 +2,7 @@
   "name": "List ships",
   "method": "GET",
   "path": "/ships?limit=${limit}&sort=-launchedYear",
-  "outputs": [
-    { "shipCount": "response.headers.X-Total-Count" }
-  ]
+  "outputs": {
+    "shipCount": "response.headers.X-Total-Count"
+  }
 }

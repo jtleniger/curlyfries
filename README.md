@@ -13,6 +13,9 @@ reuse them without logging in again.
   random values when nothing defines them.
 - **Captures** — `outputs` pull values out of a response body, a header or the
   status line and keep them for later requests (in this run or a later one).
+  Mark a value secret — an environment entry or an `outputs` entry written
+  `{ "secret": true, "value": … }` — and the UI shows `••••••` instead of it
+  while the real value is still substituted, sent and persisted.
 - **Loud failures** — an undefined variable, a missing output path or a broken
   `${` names the file, the JSON pointer and the value that caused it.
 
@@ -74,7 +77,7 @@ that failure appears in its own wrapped **Output error** section below the tabs.
 │ships/                                ││headers                               │
 │  GET ships/list — …                  ││Content-Type: application/json        │
 │                                      ││body                                  │
-│                                      ││{ "username": "silver", … }           │
+│                                      ││"••••••"                              │
 │                                      │╰──────────────────────────────────────╯
 │                                      │╭Response — http://…/auth/login────────╮
 │                                      ││← 200 OK  1ms                         │
@@ -82,7 +85,7 @@ that failure appears in its own wrapped **Output error** section below the tabs.
 │                                      ││{ "access_token": "…" }               │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────╯
 ╭Captures — dev─────────────────────────────────────────────╮
-│token = "eyJhbGciOiJIUzI1NiIs…"                            │
+│token = ••••••                                             │
 ╰───────────────────────────────────────────────────────────╯
 ↑↓ select · Enter run · e env · x clear · Tab body/headers/raw · v definition/resolved · / filter · ? help · q quit
 ```

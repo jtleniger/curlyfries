@@ -2,13 +2,13 @@
 
 use std::time::Duration;
 
-use crate::Map;
 use crate::error::Error;
 use crate::execute::{self, ExecResult, ResolvedRequest};
 use crate::project::{Entry, Project};
 use crate::request;
 use crate::scopes::Scopes;
 use crate::session::{self, Session};
+use crate::variables::Variables;
 
 /// Everything needed to execute requests against one project.
 pub struct Runner<'a> {
@@ -19,7 +19,7 @@ pub struct Runner<'a> {
     /// Selected environment name, if any.
     pub env_name: Option<String>,
     /// Variables from the selected environment.
-    pub env: Map,
+    pub env: Variables,
     /// Capture store, persisted between invocations.
     pub session: &'a mut Session,
     /// HTTP agent.
@@ -37,10 +37,12 @@ pub struct Runner<'a> {
 pub struct RunOutcome {
     /// The request as sent.
     pub request: ResolvedRequest,
+    /// The request as it would render with secret values masked.
+    pub display_url: String,
     /// The response as received.
     pub response: ExecResult,
     /// Variables captured from this response.
-    pub captured: Map,
+    pub captured: Variables,
     /// Why `outputs` evaluation failed, if it did. When set, `captured` is empty.
     pub capture_error: Option<Error>,
 }
@@ -55,13 +57,17 @@ impl Runner<'_> {
             .clone()
             .unwrap_or_else(|| session::NO_ENV_KEY.to_string());
 
-        let resolved = {
+        let (resolved, display_url) = {
             let scopes = Scopes {
                 env_name: self.env_name.as_deref(),
                 env: &self.env,
-                session: self.session.vars(&scope),
+                session: self.session.variables(&scope),
             };
-            execute::render_request(&def, &scopes)?
+            let resolved = execute::render_request(&def, &scopes)?;
+            let display_url = execute::render_request_display(&def, &scopes)
+                .map(|request| request.url)
+                .unwrap_or_else(|_| resolved.url.clone());
+            (resolved, display_url)
         };
 
         let response =
@@ -79,11 +85,11 @@ impl Runner<'_> {
         }
         let (captured, capture_error) = match execute::capture(&def.outputs, &response, &def.file) {
             Ok(captured) => (captured, None),
-            Err(error) => (Map::new(), Some(error)),
+            Err(error) => (Variables::default(), Some(error)),
         };
 
         if !captured.is_empty() {
-            self.session.set(&scope, captured.clone());
+            self.session.set(&scope, &captured);
             if let Err(error) = self.session.save() {
                 let path = self.session.path.display();
                 let reason = match &error {
@@ -98,6 +104,7 @@ impl Runner<'_> {
 
         Ok(RunOutcome {
             request: resolved,
+            display_url,
             response,
             captured,
             capture_error,

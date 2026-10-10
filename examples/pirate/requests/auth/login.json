@@ -3,8 +3,8 @@
   "method": "POST",
   "path": "/auth/login",
   "body": "${pirate}",
-  "outputs": [
-    { "token": "response.body.access_token" },
-    { "role": "response.body.user.role" }
-  ]
+  "outputs": {
+    "token": { "secret": true, "value": "response.body.access_token" },
+    "role": "response.body.user.role"
+  }
 }

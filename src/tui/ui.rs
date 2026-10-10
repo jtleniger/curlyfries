@@ -316,6 +316,7 @@ fn draw_captures(app: &App, frame: &mut Frame, area: Rect, theme: &Theme) {
         .border_style(Style::default().fg(theme.dim))
         .title(format!("Captures — {}", app.scope()));
     let captured = app.captured();
+    let secrets = app.captured_secrets();
     let mut lines: Vec<Line<'static>> = Vec::new();
     if captured.is_empty() {
         lines.push(Line::styled(
@@ -326,7 +327,7 @@ fn draw_captures(app: &App, frame: &mut Frame, area: Rect, theme: &Theme) {
         for (name, value) in captured.iter().take(3) {
             lines.push(Line::from(format!(
                 "{name} = {}",
-                render::captured_value(value)
+                render::captured_value(value, secrets.contains(name))
             )));
         }
         if captured.len() > 3 {

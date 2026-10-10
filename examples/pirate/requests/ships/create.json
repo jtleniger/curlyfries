@@ -13,8 +13,8 @@
     "status": "docked",
     "launchedYear": "${random.int.1400.2100}"
   },
-  "outputs": [
-    { "shipId": "response.body.id" },
-    { "shipName": "response.body.name" }
-  ]
+  "outputs": {
+    "shipId": "response.body.id",
+    "shipName": "response.body.name"
+  }
 }

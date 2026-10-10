@@ -32,6 +32,7 @@ pub mod scopes;
 pub mod session;
 pub mod template;
 pub mod tui;
+pub mod variables;
 
 #[cfg(test)]
 pub mod testutil;
