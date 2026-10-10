@@ -29,6 +29,8 @@ pub struct ResolvedRequest {
     pub url: String,
     /// Resolved request headers, in file order plus a default `Content-Type`.
     pub headers: Vec<(String, String)>,
+    /// Resolved query pairs actually appended to the URL, in file order.
+    pub query: Vec<(String, String)>,
     /// Serialized request body.
     pub body: Option<String>,
 }
@@ -123,6 +125,28 @@ fn join_url<F: Fn(&str) -> Option<Value>>(
     ))
 }
 
+/// Appends rendered query pairs to `url`, using `&` when `url` already has a
+/// query. Values are inserted verbatim (no percent-encoding), matching how
+/// `path` templates are interpolated.
+fn append_query(url: String, pairs: &[(String, String)]) -> String {
+    if pairs.is_empty() {
+        return url;
+    }
+    let joined = pairs
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    let separator = if url.ends_with('?') || url.ends_with('&') {
+        ""
+    } else if url.contains('?') {
+        "&"
+    } else {
+        "?"
+    };
+    format!("{url}{separator}{joined}")
+}
+
 /// Resolves every template in `def` into a ready-to-send request.
 pub fn render_request(def: &RequestDef, scopes: &Scopes<'_>) -> Result<ResolvedRequest, Error> {
     render_with(def, scopes, &scopes.lookup_fn())
@@ -146,7 +170,7 @@ fn render_with<F: Fn(&str) -> Option<Value>>(
     lookup: &F,
 ) -> Result<ResolvedRequest, Error> {
     let path = render_string(def, "/path", &def.path, scopes, lookup)?;
-    let url = join_url(&def.id, &def.file, &path, scopes, lookup)?;
+    let mut url = join_url(&def.id, &def.file, &path, scopes, lookup)?;
     let name = render_string(def, "/name", &def.name, scopes, lookup)?;
     if name.is_empty() {
         return Err(Error::Schema {
@@ -174,6 +198,25 @@ fn render_with<F: Fn(&str) -> Option<Value>>(
         let value = render_string(def, &pointer, value, scopes, lookup)?;
         headers.push((name, value));
     }
+
+    let mut query = Vec::with_capacity(def.query.len());
+    for (key, value) in &def.query {
+        let pointer = format!("/query/{}", crate::variables::pointer_token(key));
+        let name = template::parse(key)
+            .map_err(|problem| request::template_error(&def.file, &pointer, problem, key))?
+            .render_string(lookup)
+            .map_err(|error| render_failure(def, &pointer, key, scopes, error))?;
+        if name.is_empty() {
+            return Err(Error::Schema {
+                path: def.file.clone(),
+                pointer,
+                message: format!("query name `{key}` rendered to an empty string"),
+            });
+        }
+        let value = render_string(def, &pointer, value, scopes, lookup)?;
+        query.push((name, value));
+    }
+    url = append_query(url, &query);
 
     let body = match &def.body {
         None => None,
@@ -203,6 +246,7 @@ fn render_with<F: Fn(&str) -> Option<Value>>(
         method: def.method.clone(),
         url,
         headers,
+        query,
         body,
     })
 }

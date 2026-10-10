@@ -198,3 +198,50 @@ fn a_second_scope_keeps_its_own_variables() {
     assert_eq!(reloaded.vars("stage").len(), 1);
     let _ = server.finish();
 }
+
+#[test]
+fn disabled_slots_are_dropped_from_the_sent_request() {
+    let server = StubServer::start(|_| {
+        vec![
+            StubResponse::json(200, "OK", "{}"),
+            StubResponse::json(200, "OK", "{}"),
+        ]
+    });
+    let dir = project_fixture(
+        "runner-disabled",
+        &server,
+        &[(
+            "requests/ships/list.json",
+            r#"{
+              "method": "GET",
+              "path": "/ships",
+              "headers": { "X-Fingerprint": "abc" },
+              "query": { "limit": "2" }
+            }"#,
+        )],
+    );
+    let (project, entries) = load_project(&dir);
+
+    {
+        let (env_name, env) = environment(&project);
+        let mut session = Session::load(&project.root).unwrap();
+        let mut runner = runner(&project, &entries, &mut session, env_name, env);
+        runner.disabled.headers.insert("X-Fingerprint".to_string());
+        runner.disabled.query.insert("limit".to_string());
+        runner.execute_id("ships/list").unwrap();
+    }
+
+    {
+        let (env_name, env) = environment(&project);
+        let mut session = Session::load(&project.root).unwrap();
+        let mut runner = runner(&project, &entries, &mut session, env_name, env);
+        runner.execute_id("ships/list").unwrap();
+    }
+
+    let received = server.finish();
+    assert_eq!(received.len(), 2);
+    assert_eq!(received[0].header("X-Fingerprint"), None);
+    assert_eq!(received[0].target, "/ships");
+    assert_eq!(received[1].header("X-Fingerprint"), Some("abc"));
+    assert_eq!(received[1].target, "/ships?limit=2");
+}

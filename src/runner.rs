@@ -22,6 +22,8 @@ pub struct Runner<'a> {
     pub env: Variables,
     /// Chosen `${name[]}` values, keyed `name[]`.
     pub picks: Variables,
+    /// Header and query slots switched off for this run.
+    pub disabled: request::DisabledSlots,
     /// Capture store, persisted between invocations.
     pub session: &'a mut Session,
     /// HTTP agent.
@@ -53,7 +55,7 @@ impl Runner<'_> {
     /// Resolves, sends and captures one request id.
     pub fn execute_id(&mut self, id: &str) -> Result<RunOutcome, Error> {
         let entry = find_entry(self.entries, id)?;
-        let def = request::load_request(&entry.id, &entry.file)?;
+        let def = request::load_request(&entry.id, &entry.file)?.without_disabled(&self.disabled);
         let scope = self
             .env_name
             .clone()

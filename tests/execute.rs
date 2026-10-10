@@ -521,3 +521,55 @@ fn failed_captures_store_nothing() {
     assert!(session.is_empty());
     let _ = server.finish();
 }
+
+#[test]
+fn query_entries_are_appended_to_the_url() {
+    let base = "http://127.0.0.1:9";
+    let env = curlyfries::variables::Variables::from_values(map(&[("baseUrl", json!(base))]));
+    let session = curlyfries::variables::Variables::default();
+    let scopes = Scopes {
+        env_name: Some("dev"),
+        env: &env,
+        session: &session,
+        picks: None,
+    };
+
+    // Existing query in `path` gets `&`; a bare path gets `?`.
+    let merged = def(
+        "x",
+        json!({ "method": "GET", "path": "/ships?a=1", "query": { "limit": "2" } }),
+    );
+    assert_eq!(
+        execute::render_request(&merged, &scopes).unwrap().url,
+        format!("{base}/ships?a=1&limit=2")
+    );
+
+    let fresh = def(
+        "x",
+        json!({ "method": "GET", "path": "/ships", "query": { "limit": "2" } }),
+    );
+    assert_eq!(
+        execute::render_request(&fresh, &scopes).unwrap().url,
+        format!("{base}/ships?limit=2")
+    );
+
+    // An absolute path is used verbatim and still takes the query.
+    let absolute = def(
+        "x",
+        json!({ "method": "GET", "path": "http://x/y", "query": { "limit": "2" } }),
+    );
+    assert_eq!(
+        execute::render_request(&absolute, &scopes).unwrap().url,
+        "http://x/y?limit=2"
+    );
+
+    // An undefined variable fails loudly, naming the pointer and the variable.
+    let missing = def(
+        "x",
+        json!({ "method": "GET", "path": "/ships", "query": { "a": "${missing}" } }),
+    );
+    let error = execute::render_request(&missing, &scopes).unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("/query/a"), "{text}");
+    assert!(text.contains("missing"), "{text}");
+}

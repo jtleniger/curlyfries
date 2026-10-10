@@ -374,6 +374,7 @@ pub fn runner<'a>(
         env_name,
         env,
         picks: curlyfries::variables::Variables::default(),
+        disabled: curlyfries::request::DisabledSlots::default(),
         session,
         client: curlyfries::execute::client(timeout),
         timeout,

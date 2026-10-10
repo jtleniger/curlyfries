@@ -377,7 +377,11 @@ fn import_writes_a_runnable_project() {
             r#"{
   "name": "List ships",
   "method": "GET",
-  "path": "/ships?limit=25&sort=${sort}"
+  "path": "/ships",
+  "query": {
+    "limit": "25",
+    "sort": "${sort}"
+  }
 }"#,
         ),
     ];
@@ -495,7 +499,10 @@ paths:
             r#"{
   "name": "ping",
   "method": "GET",
-  "path": "/ping?verbose=true"
+  "path": "/ping",
+  "query": {
+    "verbose": "true"
+  }
 }"#,
         ),
         file(

@@ -70,7 +70,8 @@ second login. Press `e` to pick the environment (`(none)` plus every
 Running `curlyfries` opens a full-screen TUI: the request
 tree on the left, the resolved (or definition) request above the response, the
 active scope's captures below, and a key legend at the bottom. The resolved
-request labels each part — `url`, `headers` and `body`. Whenever a response
+request labels each part — `url`, `headers`, `query` and `body` — and lists every
+header and query slot with its `[x]`/`[ ]` toggle state. Whenever a response
 arrives its status line is shown, even if an `outputs` expression then fails;
 that failure appears in its own wrapped **Output error** section below the tabs.
 
@@ -79,7 +80,9 @@ that failure appears in its own wrapped **Output error** section below the tabs.
 │auth/                                 ││url                                   │
 │  POST login                          ││POST http://127.0.0.1:4000/auth/login │
 │ships/                                ││headers                               │
-│  GET list                            ││Content-Type: application/json        │
+│  GET list                            ││[x] Content-Type: application/json    │
+│                                      ││query                                 │
+│                                      ││(none)                                │
 │                                      ││body                                  │
 │                                      ││"••••••"                              │
 │                                      │╰──────────────────────────────────────╯
@@ -91,7 +94,7 @@ that failure appears in its own wrapped **Output error** section below the tabs.
 ╭Captures — dev─────────────────────────────────────────────╮
 │token = ••••••                                             │
 ╰───────────────────────────────────────────────────────────╯
-↑↓ select · Enter run · e env · x clear · Tab body/headers/raw · v definition/resolved · / filter · ? help · q quit
+↑↓ select · Enter run · e env · t toggle · x clear · Tab body/headers/raw · v definition/resolved · / filter · ? help · q quit
 ```
 
 | key | effect |
@@ -100,6 +103,7 @@ that failure appears in its own wrapped **Output error** section below the tabs.
 | `g`, `G` | first / last request |
 | `Enter`, `r` | run the selected request (a `${name[]}` slot opens a picker first); the status line, body and captures update in place |
 | `e` | choose the environment (`(none)` plus every `environments/*.json`) |
+| `t` | enable/disable individual `headers` and `query` entries for the selected request (session-only) |
 | `x`, `X` | clear the active scope / every scope, each behind a `y/n` confirmation |
 | `/` | filter the tree; `Esc` clears, `Enter` keeps the filter |
 | `Tab`, `Shift-Tab` | next / previous response tab |
@@ -209,7 +213,7 @@ error: output `shipId` failed in requests/ships/create.json
 ```
 error: invalid request file requests/ships/create.json
   at:    /ouputs
-  reason: unknown key `ouputs` (allowed: body, headers, method, name, outputs, path)
+  reason: unknown key `ouputs` (allowed: body, headers, method, name, outputs, path, query)
 ```
 
 ```

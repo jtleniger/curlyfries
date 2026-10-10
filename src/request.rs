@@ -1,5 +1,6 @@
 //! Loading and validating request files.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -9,7 +10,9 @@ use crate::error::{Error, TemplateProblem};
 use crate::{Map, expression, template, variables};
 
 /// Keys allowed at the top level of a request file.
-pub const ALLOWED_KEYS: [&str; 6] = ["body", "headers", "method", "name", "outputs", "path"];
+pub const ALLOWED_KEYS: [&str; 7] = [
+    "body", "headers", "method", "name", "outputs", "path", "query",
+];
 
 /// Methods a request may use, in the order they are listed in errors.
 pub const METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
@@ -41,6 +44,8 @@ pub struct RequestDef {
     pub path: String,
     /// Raw (possibly templated) header name/value pairs, in file order.
     pub headers: Vec<(String, String)>,
+    /// Raw (possibly templated) query parameter name/value pairs, in file order.
+    pub query: Vec<(String, String)>,
     /// Raw (possibly templated) body, `None` when absent or `null`.
     pub body: Option<Value>,
     /// Captured variables, in file order.
@@ -125,6 +130,22 @@ pub fn validate(id: &str, file: &Path, value: &Value) -> Result<RequestDef, Erro
         }
     }
 
+    let mut query = Vec::new();
+    if let Some(value) = map.get("query") {
+        let Value::Object(query_map) = value else {
+            return Err(schema("/query", "`query` must be an object".to_string()));
+        };
+        for (key, value) in query_map {
+            let Some(value) = value.as_str() else {
+                return Err(schema(
+                    &format!("/query/{}", variables::pointer_token(key)),
+                    format!("`query.{key}` must be a string"),
+                ));
+            };
+            query.push((key.clone(), value.to_string()));
+        }
+    }
+
     let body = match map.get("body") {
         None | Some(Value::Null) => None,
         Some(value) => Some(value.clone()),
@@ -164,6 +185,7 @@ pub fn validate(id: &str, file: &Path, value: &Value) -> Result<RequestDef, Erro
         method: method_upper,
         path,
         headers,
+        query,
         body,
         outputs,
     };
@@ -182,10 +204,44 @@ pub fn validate(id: &str, file: &Path, value: &Value) -> Result<RequestDef, Erro
             value,
         )?;
     }
+    for (key, value) in &def.query {
+        check_template(
+            file,
+            &format!("/query/{}", variables::pointer_token(key)),
+            key,
+        )?;
+        check_template(
+            file,
+            &format!("/query/{}", variables::pointer_token(key)),
+            value,
+        )?;
+    }
     if let Some(body) = &def.body {
         check_templates_in_tree(file, "/body", body)?;
     }
     Ok(def)
+}
+
+/// Slots of one request switched off for a run, keyed by the raw file key.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DisabledSlots {
+    /// Header names (raw `headers` keys) switched off.
+    pub headers: BTreeSet<String>,
+    /// Query parameter names (raw `query` keys) switched off.
+    pub query: BTreeSet<String>,
+}
+
+impl RequestDef {
+    /// A copy of this definition with every disabled header/query entry
+    /// removed. Keys match the raw file key, so templating cannot move a
+    /// toggle.
+    pub fn without_disabled(&self, disabled: &DisabledSlots) -> RequestDef {
+        let mut def = self.clone();
+        def.headers
+            .retain(|(key, _)| !disabled.headers.contains(key));
+        def.query.retain(|(key, _)| !disabled.query.contains(key));
+        def
+    }
 }
 
 fn required_string(file: &Path, map: &Map, key: &str) -> Result<String, Error> {
@@ -254,6 +310,10 @@ pub fn pick_names(def: &RequestDef) -> Vec<String> {
         collect_picks(key, &mut names);
         collect_picks(value, &mut names);
     }
+    for (key, value) in &def.query {
+        collect_picks(key, &mut names);
+        collect_picks(value, &mut names);
+    }
     if let Some(body) = &def.body {
         collect_tree_picks(body, &mut names);
     }
@@ -315,6 +375,7 @@ mod tests {
         assert_eq!(def.method, "GET");
         assert_eq!(def.path, "/pets");
         assert!(def.headers.is_empty());
+        assert!(def.query.is_empty());
         assert_eq!(def.body, None);
         assert!(def.outputs.is_empty());
     }
@@ -433,7 +494,7 @@ mod tests {
                 assert_eq!(pointer, "/ouputs");
                 assert!(message.contains("unknown key `ouputs`"), "{message}");
                 assert!(
-                    message.contains("allowed: body, headers, method, name, outputs, path"),
+                    message.contains("allowed: body, headers, method, name, outputs, path, query"),
                     "{message}"
                 );
             }

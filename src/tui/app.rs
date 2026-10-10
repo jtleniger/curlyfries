@@ -1,6 +1,6 @@
 //! TUI state machine: selection, environment switching and request runs.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
@@ -16,7 +16,7 @@ use crate::error::Error;
 use crate::execute::{self, ExecResult, ResolvedRequest};
 use crate::project::{self, Entry, Project};
 use crate::render::{self, StatusClass};
-use crate::request::{self, RequestDef};
+use crate::request::{self, DisabledSlots, RequestDef};
 use crate::runner::{self, Runner};
 use crate::scopes::Scopes;
 use crate::session::{self, Session};
@@ -84,6 +84,27 @@ struct PickModal {
     selected: usize,
 }
 
+/// Which list a toggle row belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SlotKind {
+    Header,
+    Query,
+}
+
+/// One toggleable slot of a request.
+struct ToggleRow {
+    kind: SlotKind,
+    key: String,
+    value: String,
+}
+
+/// The open enable/disable modal for one request.
+pub(crate) struct ToggleModal {
+    entry_index: usize,
+    rows: Vec<ToggleRow>,
+    selected: usize,
+}
+
 /// A finished run, sent from the worker thread.
 struct RunMsg {
     /// Scope the run was started in.
@@ -137,6 +158,10 @@ pub struct App {
     pending: Option<PendingRun>,
     /// The open picker for one array variable, if any.
     pick_modal: Option<PickModal>,
+    /// The open enable/disable modal for one request, if any.
+    pub(crate) toggle_modal: Option<ToggleModal>,
+    /// Header and query slots switched off, keyed by request id.
+    disabled: HashMap<String, DisabledSlots>,
     pub(crate) confirm: Option<PendingClear>,
     pub(crate) help: bool,
     pub(crate) status_message: Option<String>,
@@ -203,6 +228,8 @@ impl App {
             env_picker: None,
             pending: None,
             pick_modal: None,
+            toggle_modal: None,
+            disabled: HashMap::new(),
             confirm: None,
             help: false,
             status_message: None,
@@ -230,6 +257,10 @@ impl App {
         }
         if self.pick_modal.is_some() {
             self.pick_key(key);
+            return;
+        }
+        if self.toggle_modal.is_some() {
+            self.toggle_key(key);
             return;
         }
         if self.env_picker.is_some() {
@@ -420,6 +451,31 @@ impl App {
         })
     }
 
+    /// Request id, `(enabled, label)` rows and selection of the open toggle modal.
+    pub(crate) fn toggle_prompt(&self) -> Option<(String, Vec<(bool, String)>, usize)> {
+        self.toggle_modal.as_ref().map(|modal| {
+            let id = self.entries[modal.entry_index].id.clone();
+            let slots = self.disabled.get(&id);
+            let rows = modal
+                .rows
+                .iter()
+                .map(|row| {
+                    let enabled = match (row.kind, slots) {
+                        (SlotKind::Header, Some(slots)) => !slots.headers.contains(&row.key),
+                        (SlotKind::Query, Some(slots)) => !slots.query.contains(&row.key),
+                        (_, None) => true,
+                    };
+                    let label = match row.kind {
+                        SlotKind::Header => format!("header  {}: {}", row.key, row.value),
+                        SlotKind::Query => format!("query   {}={}", row.key, row.value),
+                    };
+                    (enabled, label)
+                })
+                .collect();
+            (id, rows, modal.selected)
+        })
+    }
+
     // --- key handling ------------------------------------------------------
 
     fn picker_key(&mut self, key: KeyEvent) {
@@ -462,6 +518,69 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Opens the toggle modal for the selected request.
+    fn open_toggle_modal(&mut self) {
+        let Some(index) = self.selected_entry() else {
+            return;
+        };
+        let def = &self.defs[index];
+        let mut rows = Vec::with_capacity(def.headers.len() + def.query.len());
+        rows.extend(def.headers.iter().map(|(key, value)| ToggleRow {
+            kind: SlotKind::Header,
+            key: key.clone(),
+            value: value.clone(),
+        }));
+        rows.extend(def.query.iter().map(|(key, value)| ToggleRow {
+            kind: SlotKind::Query,
+            key: key.clone(),
+            value: value.clone(),
+        }));
+        self.toggle_modal = Some(ToggleModal {
+            entry_index: index,
+            rows,
+            selected: 0,
+        });
+    }
+
+    /// Handles a key while the toggle modal is up.
+    fn toggle_key(&mut self, key: KeyEvent) {
+        let Some(modal) = self.toggle_modal.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                modal.selected = modal.selected.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let last = modal.rows.len().saturating_sub(1);
+                modal.selected = (modal.selected + 1).min(last);
+            }
+            KeyCode::Char(' ') | KeyCode::Enter => self.toggle_selected(),
+            KeyCode::Esc | KeyCode::Char('q') => self.toggle_modal = None,
+            _ => {}
+        }
+    }
+
+    /// Flips the highlighted slot on/off and re-renders the request pane.
+    fn toggle_selected(&mut self) {
+        let Some(modal) = self.toggle_modal.as_ref() else {
+            return;
+        };
+        let Some(row) = modal.rows.get(modal.selected) else {
+            return;
+        };
+        let id = self.entries[modal.entry_index].id.clone();
+        let slots = self.disabled.entry(id).or_default();
+        let set = match row.kind {
+            SlotKind::Header => &mut slots.headers,
+            SlotKind::Query => &mut slots.query,
+        };
+        if !set.remove(&row.key) {
+            set.insert(row.key.clone());
+        }
+        self.refresh_request_views();
     }
 
     /// Opens the next picker, or sends the request once every pick is chosen.
@@ -556,6 +675,7 @@ impl App {
             KeyCode::Char('G') => self.select_edge(true),
             KeyCode::Enter | KeyCode::Char('r') => self.run_selected(),
             KeyCode::Char('e') => self.open_env_picker(),
+            KeyCode::Char('t') => self.open_toggle_modal(),
             KeyCode::Tab if shift => self.cycle_response_tab(false),
             KeyCode::BackTab => self.cycle_response_tab(false),
             KeyCode::Tab => self.cycle_response_tab(true),
@@ -769,8 +889,14 @@ impl App {
                 session: self.session.variables(self.scope()),
                 picks: None,
             };
-            match execute::render_request_display(&self.defs[index], &scopes) {
-                Ok(request) => resolved_lines(&request, &theme),
+            let disabled = self
+                .disabled
+                .get(&self.defs[index].id)
+                .cloned()
+                .unwrap_or_default();
+            let def = self.defs[index].without_disabled(&disabled);
+            match execute::render_request_display(&def, &scopes) {
+                Ok(request) => resolved_lines(&self.defs[index], &disabled, &request, &theme),
                 Err(error) => vec![Line::styled(
                     format!("{error}"),
                     Style::default().fg(theme.method_delete),
@@ -846,6 +972,7 @@ impl App {
         let (project, entries) = (self.project.clone(), self.entries.clone());
         let (env_name, env) = (self.env_name.clone(), self.env.clone());
         let picks = Variables::from_values(choices);
+        let disabled = self.disabled.get(&id).cloned().unwrap_or_default();
         let timeout = self.timeout;
         std::thread::spawn(move || {
             let mut session = match Session::load(&project.root) {
@@ -865,6 +992,7 @@ impl App {
                 env_name: env_name.clone(),
                 env,
                 picks,
+                disabled,
                 session: &mut session,
                 client: execute::client(timeout),
                 timeout,
@@ -891,7 +1019,17 @@ fn plain_lines(text: &str) -> Vec<Line<'static>> {
 }
 
 /// Renders a resolved request for the request pane, labelling each part.
-fn resolved_lines(request: &ResolvedRequest, theme: &Theme) -> Vec<Line<'static>> {
+///
+/// `def` is the request as written and `disabled` the slots switched off, so
+/// the `headers` and `query` sections list every slot in file order with its
+/// toggle state (`[x]` enabled, `[ ]` off). Switched-off slots keep their raw
+/// text, since their templates are never evaluated.
+fn resolved_lines(
+    def: &RequestDef,
+    disabled: &DisabledSlots,
+    request: &ResolvedRequest,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     let section = |title: &str| Line::styled(title.to_string(), Style::default().fg(theme.title));
     let empty = || Line::styled("(none)", Style::default().fg(theme.dim));
 
@@ -908,14 +1046,44 @@ fn resolved_lines(request: &ResolvedRequest, theme: &Theme) -> Vec<Line<'static>
         ]),
     ];
 
+    // Sent values line up with the enabled slots in file order; headers added
+    // at render time (a default `Content-Type`) follow them.
+    let mut sent = request.headers.iter();
+    let mut headers: Vec<String> = Vec::new();
+    for (key, value) in &def.headers {
+        if disabled.headers.contains(key) {
+            headers.push(format!("[ ] {key}: {value}"));
+        } else if let Some((name, value)) = sent.next() {
+            headers.push(format!("[x] {name}: {value}"));
+        }
+    }
+    headers.extend(sent.map(|(name, value)| format!("[x] {name}: {value}")));
+
     lines.push(Line::raw(String::new()));
     lines.push(section("headers"));
-    if request.headers.is_empty() {
+    if headers.is_empty() {
         lines.push(empty());
     } else {
-        for (name, value) in &request.headers {
-            lines.push(Line::from(format!("{name}: {value}")));
+        lines.extend(headers.into_iter().map(Line::from));
+    }
+
+    let mut sent = request.query.iter();
+    let mut query: Vec<String> = Vec::new();
+    for (key, value) in &def.query {
+        if disabled.query.contains(key) {
+            query.push(format!("[ ] {key}={value}"));
+        } else if let Some((name, value)) = sent.next() {
+            query.push(format!("[x] {name}={value}"));
         }
+    }
+    query.extend(sent.map(|(name, value)| format!("[x] {name}={value}")));
+
+    lines.push(Line::raw(String::new()));
+    lines.push(section("query"));
+    if query.is_empty() {
+        lines.push(empty());
+    } else {
+        lines.extend(query.into_iter().map(Line::from));
     }
 
     lines.push(Line::raw(String::new()));
@@ -1098,43 +1266,93 @@ mod tests {
     #[test]
     fn resolved_lines_label_each_part() {
         let theme = Theme::plain();
+        let def = request::validate(
+            "ships/list",
+            std::path::Path::new("requests/ships/list.json"),
+            &json!({
+                "method": "POST",
+                "path": "/ships",
+                "headers": { "X-Trace": "abc" },
+                "query": { "limit": "2" }
+            }),
+        )
+        .expect("test request is valid");
         let request = ResolvedRequest {
             id: "ships/list".to_string(),
             def_file: std::path::PathBuf::from("requests/ships/list.json"),
             name: "list ships".to_string(),
             method: "POST".to_string(),
-            url: "http://127.0.0.1:4000/ships".to_string(),
-            headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+            url: "http://127.0.0.1:4000/ships?limit=2".to_string(),
+            headers: vec![
+                ("X-Trace".to_string(), "abc".to_string()),
+                ("Content-Type".to_string(), "application/json".to_string()),
+            ],
+            query: vec![("limit".to_string(), "2".to_string())],
             body: Some(r#"{"name":"x"}"#.to_string()),
         };
-        let text: Vec<String> = resolved_lines(&request, &theme)
+        let text: Vec<String> = resolved_lines(&def, &DisabledSlots::default(), &request, &theme)
             .iter()
             .map(|line| line.to_string())
             .collect();
         assert_eq!(text[0], "url");
         assert!(
-            text[1].contains("POST http://127.0.0.1:4000/ships"),
+            text[1].contains("POST http://127.0.0.1:4000/ships?limit=2"),
             "{text:?}"
         );
         assert!(text.contains(&"headers".to_string()), "{text:?}");
+        // Every defined header is listed with its state; the default
+        // `Content-Type` is shown too, without a file slot of its own.
+        assert!(text.contains(&"[x] X-Trace: abc".to_string()), "{text:?}");
         assert!(
-            text.contains(&"Content-Type: application/json".to_string()),
+            text.contains(&"[x] Content-Type: application/json".to_string()),
             "{text:?}"
         );
+        assert!(text.contains(&"query".to_string()), "{text:?}");
+        assert!(text.contains(&"[x] limit=2".to_string()), "{text:?}");
         assert!(text.contains(&"body".to_string()), "{text:?}");
 
+        // A switched-off header keeps its raw text and shows `[ ]`; the render
+        // that produced `request` for the enabled case would have dropped it.
+        let mut disabled = DisabledSlots::default();
+        disabled.headers.insert("X-Trace".to_string());
+        let stripped = ResolvedRequest {
+            headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+            ..request.clone()
+        };
+        let text: Vec<String> = resolved_lines(&def, &disabled, &stripped, &theme)
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        assert!(text.contains(&"[ ] X-Trace: abc".to_string()), "{text:?}");
+        assert!(
+            text.contains(&"[x] Content-Type: application/json".to_string()),
+            "{text:?}"
+        );
+        assert!(
+            !text.iter().any(|line| line == "[x] X-Trace: abc"),
+            "{text:?}"
+        );
+
+        // A request with no slots shows `(none)` under all three sections.
+        let bare = request::validate(
+            "x",
+            std::path::Path::new("requests/x.json"),
+            &json!({ "method": "GET", "path": "/x" }),
+        )
+        .expect("test request is valid");
         let bodyless = ResolvedRequest {
             headers: Vec::new(),
+            query: Vec::new(),
             body: None,
             ..request
         };
-        let text: Vec<String> = resolved_lines(&bodyless, &theme)
+        let text: Vec<String> = resolved_lines(&bare, &DisabledSlots::default(), &bodyless, &theme)
             .iter()
             .map(|line| line.to_string())
             .collect();
         assert_eq!(
             text.iter().filter(|line| *line == "(none)").count(),
-            2,
+            3,
             "{text:?}"
         );
     }

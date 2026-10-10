@@ -392,7 +392,7 @@ fn request_file(op: &Operation, doc: &Value, used: &mut BTreeSet<String>) -> (St
     let name = non_empty(op.summary.as_deref())
         .or_else(|| non_empty(op.operation_id.as_deref()))
         .unwrap_or_else(|| format!("{} {}", op.method, op.path_template));
-    let (path, headers) = parameter_slots(op, doc);
+    let (path, headers, query) = parameter_slots(op, doc);
 
     let mut file = Map::new();
     file.insert("name".to_string(), Value::String(name));
@@ -400,6 +400,9 @@ fn request_file(op: &Operation, doc: &Value, used: &mut BTreeSet<String>) -> (St
     file.insert("path".to_string(), Value::String(path));
     if !headers.is_empty() {
         file.insert("headers".to_string(), Value::Object(headers));
+    }
+    if !query.is_empty() {
+        file.insert("query".to_string(), Value::Object(query));
     }
     if let Some(schema) = &op.body_schema {
         let body = render_example(schema, doc, &mut Vec::new())
@@ -478,12 +481,12 @@ fn template_name(name: &str, used: &mut BTreeSet<String>) -> String {
     candidate
 }
 
-/// The request `path` and `headers` for `op`'s parameters.
-fn parameter_slots(op: &Operation, doc: &Value) -> (String, Map) {
+/// The request `path`, `headers` and `query` for `op`'s parameters.
+fn parameter_slots(op: &Operation, doc: &Value) -> (String, Map, Map) {
     let mut used = BTreeSet::new();
     let mut path = op.path_template.clone();
     let mut headers = Map::new();
-    let mut query: Vec<String> = Vec::new();
+    let mut query = Map::new();
     for parameter in &op.parameters {
         let parameter = resolve_ref(parameter, doc);
         let (Some(location), Some(name)) = (
@@ -506,10 +509,12 @@ fn parameter_slots(op: &Operation, doc: &Value) -> (String, Map) {
                     .as_ref()
                     .and_then(inline_query_text);
                 match text {
-                    Some(text) => query.push(format!("{name}={text}")),
+                    Some(text) => {
+                        query.insert(name.to_string(), Value::String(text));
+                    }
                     None => {
                         let variable = template_name(name, &mut used);
-                        query.push(format!("{name}=${{{variable}}}"));
+                        query.insert(name.to_string(), Value::String(format!("${{{variable}}}")));
                     }
                 }
             }
@@ -520,11 +525,7 @@ fn parameter_slots(op: &Operation, doc: &Value) -> (String, Map) {
             _ => {}
         }
     }
-    if !query.is_empty() {
-        path.push('?');
-        path.push_str(&query.join("&"));
-    }
-    (path, headers)
+    (path, headers, query)
 }
 
 /// The URL-safe text form of `value`, when it can be inlined into a query.
@@ -946,9 +947,13 @@ mod tests {
                 } }
             }"#,
         );
-        let (path, headers) = parameter_slots(&operation, &doc);
-        assert_eq!(path, "/ships/${id}?limit=25&sort=${sort}&query=${query}");
+        let (path, headers, query) = parameter_slots(&operation, &doc);
+        assert_eq!(path, "/ships/${id}");
         assert_eq!(Value::Object(headers), json!({ "X-Tenant": "${X-Tenant}" }));
+        assert_eq!(
+            Value::Object(query),
+            json!({ "limit": "25", "sort": "${sort}", "query": "${query}" })
+        );
     }
 
     #[test]
@@ -966,9 +971,13 @@ mod tests {
                 } } }
             }"#,
         );
-        let (path, headers) = parameter_slots(&operation, &doc);
-        assert_eq!(path, "/ping?verbose=true&ratio=0.5&filter=${filter}");
+        let (path, headers, query) = parameter_slots(&operation, &doc);
+        assert_eq!(path, "/ping");
         assert!(headers.is_empty());
+        assert_eq!(
+            Value::Object(query),
+            json!({ "verbose": "true", "ratio": "0.5", "filter": "${filter}" })
+        );
     }
 
     #[test]
@@ -1248,8 +1257,9 @@ mod tests {
             json!({
                 "name": "Get a ship",
                 "method": "GET",
-                "path": "/ships/${id}?sort=${sort}",
+                "path": "/ships/${id}",
                 "headers": { "X-Trace": "${X-Trace}" },
+                "query": { "sort": "${sort}" },
                 "body": { "flags": [] }
             })
         );

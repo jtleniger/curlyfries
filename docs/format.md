@@ -36,6 +36,7 @@ Ids are listed in sorted order.
   "method": "POST",
   "path": "/ships",
   "headers": { "Authorization": "Bearer ${token}", "X-Trace": "curlyfries" },
+  "query": { "limit": "${limit}", "sort": "-launchedYear" },
   "body": {
     "name": "Curlyfries ${random.string.8}",
     "class": "frigate",
@@ -54,6 +55,7 @@ Ids are listed in sorted order.
 | `method` | string | yes | case-insensitive, normalised to upper case. One of `GET POST PUT PATCH DELETE HEAD OPTIONS`; anything else is an error listing all seven. |
 | `path` | string | yes | may be templated. If, after templating, it starts with `http://` or `https://` it is used verbatim, otherwise it is joined to the `baseUrl` variable. |
 | `headers` | object of string → string | no | names and values may be templated. Order is preserved. |
+| `query` | object of string → string | no | names and values may be templated; appended to the URL after any query already in `path`. Order is preserved. |
 | `body` | any JSON | no | templated recursively, object keys included, then serialised compactly. `"body": null` means *no body*. A body without a `Content-Type` header gains `Content-Type: application/json`. |
 | `outputs` | object of name → entry | no | every entry is `{ "value": "<expression>" }`; add `"secret": true` to keep the capture out of the UI. The expression may use the `[]` map step to capture a whole array (see [Outputs](#outputs-expressions)). Order is file order; keys are unique by construction. |
 
@@ -62,7 +64,7 @@ Unknown keys are rejected with the allowed list, e.g.
 ```
 error: invalid request file requests/ships/create.json
   at:    /ouputs
-  reason: unknown key `ouputs` (allowed: body, headers, method, name, outputs, path)
+  reason: unknown key `ouputs` (allowed: body, headers, method, name, outputs, path, query)
 ```
 
 ## Templating
@@ -114,8 +116,9 @@ whitespace is dropped. `"body": "${pirate}"` sends the `pirate` object, and
 example request in `examples/pirate` relies on exactly this. A whole `${name[]}`
 pick behaves the same way, sending the chosen element with its own type.
 
-Slots that can only hold text — `path`, `name`, header names, header values and
-object keys inside `body` — always use the *string form* of a value instead:
+Slots that can only hold text — `path`, `name`, header names, header values,
+query names, query values and object keys inside `body` — always use the
+*string form* of a value instead:
 
 | value | string form |
 |---|---|
@@ -240,6 +243,19 @@ A pick that cannot be offered fails before anything is sent:
 
 Outside the terminal UI nothing can fill a pick slot, so a request that reaches
 one fails with `error: no value chosen for `name[]` in <file>` (exit `3`).
+
+## Toggling headers and query parameters
+
+The resolved request pane lists every `headers` and `query` slot with a `[x]`
+(enabled) or `[ ]` (disabled) marker; the `url` line and the headers actually
+sent only ever include the enabled ones. Press `t` on the selected request to
+open a toggle list: `↑`/`↓` move the highlight, `Space` or `Enter` flips the
+highlighted slot, and `Esc` or `q` closes it. A switched-off slot is removed from
+the request that is rendered, displayed and sent, but it stays in the pane,
+showing its raw text since its templates are not evaluated.
+
+Toggle state is session-only and keyed by request id: it lives in memory for the
+life of the process and is never written to `.curlyfries/session.json`.
 
 ## Environments
 
@@ -377,8 +393,8 @@ error: unreadable session file .curlyfries/session.json
 | `auth/login` | `body: "${pirate}"` (a whole-placeholder object, and a secret environment value) and capturing `token` (secret) and `role` |
 | `auth/login-admiral` | a second login capturing `admiralToken` (secret) for the admiral-only routes |
 | `auth/me` | `Authorization: Bearer ${token}` resolved from the session |
-| `ships/list` | `limit=${limit}` from the environment plus a header capture (`shipCount`) and an array capture (`shipNames` = `response.body[].name`) |
-| `ships/by-class` | `/ships?class=${shipClasses[]}&limit=${limit}`: `Enter` opens a picker over the environment's `shipClasses` array, and the response's ship ids are captured as an array (`classShipIds` = `response.body[].id`) |
+| `ships/list` | a `query` entry (`limit=${limit}`) from the environment plus a header capture (`shipCount`) and an array capture (`shipNames` = `response.body[].name`) |
+| `ships/by-class` | `query: class=${shipClasses[]}&limit=${limit}`: `Enter` opens a picker over the environment's `shipClasses` array, and the response's ship ids are captured as an array (`classShipIds` = `response.body[].id`) |
 | `ships/detail` | nested capture `response.body.pirates[0].name` |
 | `ships/create` | `Authorization` + an inline body built from `${random.string.8}` and `${random.int.1.500}`, capturing `shipId` and `shipName` |
 | `ships/delete` | `DELETE /ships/${shipId}` with the admiral token |

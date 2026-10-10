@@ -1,7 +1,11 @@
 {
   "name": "List ships",
   "method": "GET",
-  "path": "/ships?limit=${limit}&sort=-launchedYear",
+  "path": "/ships",
+  "query": {
+    "limit": "${limit}",
+    "sort": "-launchedYear"
+  },
   "outputs": {
     "shipCount": { "value": "response.headers.X-Total-Count" },
     "shipNames": { "value": "response.body[].name" }

@@ -16,10 +16,10 @@ use crate::tui::tree::TreeRow;
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// Footer key legend.
-const FOOTER: &str = "↑↓ select · Enter run · e env · x clear · Tab body/headers/raw · v definition/resolved · / filter · ? help · q quit";
+const FOOTER: &str = "↑↓ select · Enter run · e env · t toggle · x clear · Tab body/headers/raw · v definition/resolved · / filter · ? help · q quit";
 
 /// Help overlay contents.
-const HELP: [&str; 15] = [
+const HELP: [&str; 16] = [
     "↑ / k, ↓ / j      move the selection",
     "g / G             first / last request",
     "Enter / r         run the selected request (picks array slots)",
@@ -29,6 +29,7 @@ const HELP: [&str; 15] = [
     "Tab / Shift-Tab   next / previous response tab",
     "1 / 2 / 3         Body / Headers / Raw",
     "v                 resolved / definition request",
+    "t                 enable/disable headers and query params",
     "J / K             scroll the response by one line",
     "PageUp/PageDown   scroll the response by ten lines",
     "Home / End        jump to the top / bottom",
@@ -68,6 +69,9 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
     }
     if app.pick_prompt().is_some() {
         draw_pick_modal(app, frame, area, &theme);
+    }
+    if app.toggle_modal.is_some() {
+        draw_toggle_modal(app, frame, area, &theme);
     }
     if app.confirm.is_some() {
         draw_confirm(app, frame, area, &theme);
@@ -427,6 +431,44 @@ fn draw_pick_modal(app: &App, frame: &mut Frame, area: Rect, theme: &Theme) {
         .border_style(Style::default().fg(theme.accent))
         .title(title);
     let items: Vec<Line<'static>> = options.into_iter().map(Line::from).collect();
+    let mut state = ListState::default().with_selected(Some(selected));
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(block)
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+        popup,
+        &mut state,
+    );
+}
+
+/// Centred enable/disable modal for a request's headers and query parameters.
+fn draw_toggle_modal(app: &App, frame: &mut Frame, area: Rect, theme: &Theme) {
+    let Some((id, rows, selected)) = app.toggle_prompt() else {
+        return;
+    };
+    let popup = centered(50, 60, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent))
+        .title(format!("Toggle — {id}"));
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "no headers or query parameters",
+                Style::default().fg(theme.dim),
+            ))
+            .block(block),
+            popup,
+        );
+        return;
+    }
+    let items: Vec<Line<'static>> = rows
+        .into_iter()
+        .map(|(enabled, label)| {
+            Line::from(format!("[{}] {label}", if enabled { 'x' } else { ' ' }))
+        })
+        .collect();
     let mut state = ListState::default().with_selected(Some(selected));
     frame.render_stateful_widget(
         List::new(items)

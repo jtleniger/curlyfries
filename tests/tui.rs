@@ -558,3 +558,72 @@ fn long_response_values_wrap_and_scroll_to_the_bottom() {
     assert!(!bottom.contains("\"aaa\""), "{bottom}");
     let _ = server.finish();
 }
+
+#[test]
+fn toggle_modal_disables_headers_and_query_parameters() {
+    let server = StubServer::start(|_| {
+        vec![
+            StubResponse::json(200, "OK", "{}"),
+            StubResponse::json(200, "OK", "{}"),
+        ]
+    });
+    let dir = project_fixture(
+        "tui-toggle",
+        &server,
+        &[(
+            "requests/ships/list.json",
+            r#"{
+              "method": "GET",
+              "path": "/ships",
+              "headers": { "X-Fingerprint": "abc" },
+              "query": { "limit": "2" }
+            }"#,
+        )],
+    );
+    let mut app = open(&dir);
+    app.select_id("ships/list");
+
+    let before = rendered(&mut app, 120, 40);
+    assert!(before.contains("[x] X-Fingerprint: abc"), "{before}");
+    assert!(before.contains("[x] limit=2"), "{before}");
+
+    // `t` opens the toggle modal listing every header and query slot.
+    app.on_key(key(KeyCode::Char('t')));
+    let modal = rendered(&mut app, 120, 40);
+    assert!(modal.contains("Toggle — ships/list"), "{modal}");
+    assert!(modal.contains("[x] header  X-Fingerprint: abc"), "{modal}");
+    assert!(modal.contains("[x] query   limit=2"), "{modal}");
+
+    // Space disables the highlighted header; closing shows it gone from the pane.
+    app.on_key(key(KeyCode::Char(' ')));
+    let toggled = rendered(&mut app, 120, 40);
+    assert!(
+        toggled.contains("[ ] header  X-Fingerprint: abc"),
+        "{toggled}"
+    );
+    app.on_key(key(KeyCode::Esc));
+    let closed = rendered(&mut app, 120, 40);
+    assert!(closed.contains("[ ] X-Fingerprint: abc"), "{closed}");
+    assert!(!closed.contains("[x] X-Fingerprint"), "{closed}");
+    assert!(closed.contains("limit=2"), "{closed}");
+
+    app.on_key(key(KeyCode::Enter));
+    app.wait_for_run(Duration::from_secs(5));
+
+    // Disable the query parameter too, then run again.
+    app.on_key(key(KeyCode::Char('t')));
+    app.on_key(key(KeyCode::Down));
+    app.on_key(key(KeyCode::Char(' ')));
+    let query_off = rendered(&mut app, 120, 40);
+    assert!(query_off.contains("[ ] query   limit=2"), "{query_off}");
+    app.on_key(key(KeyCode::Esc));
+    app.on_key(key(KeyCode::Enter));
+    app.wait_for_run(Duration::from_secs(5));
+
+    let received = server.finish();
+    assert_eq!(received.len(), 2);
+    assert_eq!(received[0].header("X-Fingerprint"), None);
+    assert_eq!(received[0].target, "/ships?limit=2");
+    assert_eq!(received[1].header("X-Fingerprint"), None);
+    assert_eq!(received[1].target, "/ships");
+}
