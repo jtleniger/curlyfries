@@ -140,7 +140,7 @@ impl App {
             definition_files.push(text);
         }
         let labels: Vec<String> = defs.iter().map(render::request_label).collect();
-        let rows = tree::build(&entries, &labels);
+        let rows = tree::build(&entries);
         let selected_id = entries.first().map(|entry| entry.id.clone());
 
         let mut env_choices = vec![EnvChoice::NoneKey];
@@ -620,8 +620,8 @@ impl App {
     }
 
     fn rebuild_rows(&mut self) {
-        let all = tree::build(&self.entries, &self.labels);
-        self.rows = tree::filter(&all, &self.labels, &self.filter);
+        let all = tree::build(&self.entries);
+        self.rows = tree::filter(&all, &self.entries, &self.labels, &self.filter);
         let visible = self.visible_entries();
         if !self
             .selected_entry()

@@ -24,13 +24,16 @@ fn is_control(c: char) -> bool {
     matches!(c, '\u{0}'..='\u{8}' | '\u{b}'..='\u{1f}' | '\u{7f}'..='\u{9f}')
 }
 
-/// The list label of a request: `METHOD id`, plus `— name` when it differs.
+/// The list label of a request: `METHOD name`. The tree already nests requests
+/// under their folders, so the id's path is dropped; an unnamed request (whose
+/// name defaults to the full id) falls back to its last id segment.
 pub fn request_label(def: &RequestDef) -> String {
-    let label = if def.name == def.id {
-        format!("{} {}", def.method, def.id)
+    let name = if def.name == def.id {
+        def.id.rsplit('/').next().unwrap_or(def.id.as_str())
     } else {
-        format!("{} {} — {}", def.method, def.id, def.name)
+        def.name.as_str()
     };
+    let label = format!("{} {}", def.method, name);
     sanitize_for_terminal(&label).into_owned()
 }
 
@@ -103,21 +106,29 @@ mod tests {
     }
 
     #[test]
-    fn request_labels_include_the_name_when_it_differs() {
+    fn request_labels_drop_the_folder_path() {
         let named = request::validate(
             "ships/create",
             Path::new("requests/ships/create.json"),
             &json!({ "method": "post", "path": "/ships", "name": "Create ship" }),
         )
         .unwrap();
-        assert_eq!(request_label(&named), "POST ships/create — Create ship");
+        assert_eq!(request_label(&named), "POST Create ship");
         let unnamed = request::validate(
             "ships/list",
             Path::new("requests/ships/list.json"),
             &json!({ "method": "GET", "path": "/ships" }),
         )
         .unwrap();
-        assert_eq!(request_label(&unnamed), "GET ships/list");
+        assert_eq!(request_label(&unnamed), "GET list");
+        // A request at the tree root keeps its only segment.
+        let root = request::validate(
+            "health",
+            Path::new("requests/health.json"),
+            &json!({ "method": "GET", "path": "/health" }),
+        )
+        .unwrap();
+        assert_eq!(request_label(&root), "GET health");
     }
 
     #[test]

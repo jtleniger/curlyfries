@@ -73,9 +73,9 @@ that failure appears in its own wrapped **Output error** section below the tabs.
 ```
 ╭Requests──────────────────────────────╮╭Request — resolved ───────────────────╮
 │auth/                                 ││url                                   │
-│  POST auth/login — …                 ││POST http://127.0.0.1:4000/auth/login │
+│  POST login                          ││POST http://127.0.0.1:4000/auth/login │
 │ships/                                ││headers                               │
-│  GET ships/list — …                  ││Content-Type: application/json        │
+│  GET list                            ││Content-Type: application/json        │
 │                                      ││body                                  │
 │                                      ││"••••••"                              │
 │                                      │╰──────────────────────────────────────╯

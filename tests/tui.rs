@@ -90,8 +90,11 @@ fn tree_lists_requests_and_folders() {
     let screen = rendered(&mut app, 120, 40);
     assert!(screen.contains("auth/"), "{screen}");
     assert!(screen.contains("ships/"), "{screen}");
-    assert!(screen.contains("POST"), "{screen}");
-    assert!(screen.contains("GET"), "{screen}");
+    // Labels are method + name (or the id's leaf), never the folder path.
+    assert!(screen.contains("POST Log in"), "{screen}");
+    assert!(screen.contains("GET list"), "{screen}");
+    assert!(!screen.contains("POST auth/login"), "{screen}");
+    assert!(!screen.contains("GET ships/list"), "{screen}");
 }
 
 #[test]

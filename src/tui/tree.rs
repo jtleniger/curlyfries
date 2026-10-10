@@ -21,13 +21,11 @@ pub enum TreeRow {
     },
 }
 
-/// Builds folder + request rows from `entries` (already sorted by id) and their
-/// display `labels` (one per entry, index-aligned with `entries`).
+/// Builds folder + request rows from `entries` (already sorted by id).
 ///
 /// A folder row is emitted the first time a path prefix is seen, so nested
 /// folders appear exactly once, in id order.
-pub fn build(entries: &[Entry], labels: &[String]) -> Vec<TreeRow> {
-    debug_assert_eq!(entries.len(), labels.len());
+pub fn build(entries: &[Entry]) -> Vec<TreeRow> {
     let mut rows = Vec::new();
     let mut folders: Vec<&str> = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
@@ -57,10 +55,11 @@ fn prefix_end(segments: &[&str], depth: usize) -> usize {
     segments[..=depth].iter().map(|s| s.len()).sum::<usize>() + depth
 }
 
-/// Keeps only rows whose request label contains `query` (ASCII
+/// Keeps only rows whose request id or display label contains `query` (ASCII
 /// case-insensitive), together with the folder rows needed to reach them.
-/// An empty `query` returns `rows` unchanged.
-pub fn filter(rows: &[TreeRow], labels: &[String], query: &str) -> Vec<TreeRow> {
+/// Matching the id keeps folder names searchable even though the labels no
+/// longer show the path. An empty `query` returns `rows` unchanged.
+pub fn filter(rows: &[TreeRow], entries: &[Entry], labels: &[String], query: &str) -> Vec<TreeRow> {
     if query.is_empty() {
         return rows.to_vec();
     }
@@ -76,10 +75,13 @@ pub fn filter(rows: &[TreeRow], labels: &[String], query: &str) -> Vec<TreeRow> 
         match row {
             TreeRow::Folder { depth, .. } => stack.push((position, *depth)),
             TreeRow::Request { index, .. } => {
-                let matches = labels
+                let matches_id = entries
+                    .get(*index)
+                    .is_some_and(|entry| entry.id.to_ascii_lowercase().contains(&needle));
+                let matches_label = labels
                     .get(*index)
                     .is_some_and(|label| label.to_ascii_lowercase().contains(&needle));
-                if matches {
+                if matches_id || matches_label {
                     keep[position] = true;
                     for (folder, _) in &stack {
                         keep[*folder] = true;
@@ -112,14 +114,17 @@ mod tests {
     fn labels(entries: &[Entry]) -> Vec<String> {
         entries
             .iter()
-            .map(|entry| format!("GET {}", entry.id))
+            .map(|entry| {
+                let leaf = entry.id.rsplit('/').next().unwrap_or(&entry.id);
+                format!("GET {leaf}")
+            })
             .collect()
     }
 
     #[test]
     fn nested_folders_appear_once() {
         let entries = entries(&["auth/login", "auth/me", "ships/list", "ping"]);
-        let rows = build(&entries, &labels(&entries));
+        let rows = build(&entries);
         assert_eq!(
             rows,
             vec![
@@ -142,7 +147,7 @@ mod tests {
     #[test]
     fn deeper_nesting_repeats_only_new_prefixes() {
         let entries = entries(&["a/b/c", "a/b/d", "a/e"]);
-        let rows = build(&entries, &labels(&entries));
+        let rows = build(&entries);
         assert_eq!(
             rows,
             vec![
@@ -164,17 +169,17 @@ mod tests {
     #[test]
     fn empty_query_is_identity() {
         let entries = entries(&["auth/login", "ships/list"]);
-        let rows = build(&entries, &labels(&entries));
-        assert_eq!(filter(&rows, &labels(&entries), ""), rows);
+        let rows = build(&entries);
+        assert_eq!(filter(&rows, &entries, &labels(&entries), ""), rows);
     }
 
     #[test]
     fn filter_drops_folders_with_no_matching_request() {
         let entries = entries(&["a/b/c", "a/d"]);
         let labels = labels(&entries);
-        let rows = build(&entries, &labels);
+        let rows = build(&entries);
         assert_eq!(
-            filter(&rows, &labels, "a/d"),
+            filter(&rows, &entries, &labels, "a/d"),
             vec![
                 TreeRow::Folder {
                     depth: 0,
@@ -183,15 +188,19 @@ mod tests {
                 TreeRow::Request { depth: 1, index: 1 },
             ]
         );
-        assert!(filter(&rows, &labels, "nothing").is_empty());
+        assert!(filter(&rows, &entries, &labels, "nothing").is_empty());
     }
 
     #[test]
-    fn matching_is_ascii_case_insensitive() {
-        let entries = entries(&["Ships/List"]);
-        let labels = labels(&entries);
-        let rows = build(&entries, &labels);
-        assert_eq!(filter(&rows, &labels, "ships/list").len(), 2);
-        assert_eq!(filter(&rows, &labels, "SHIPS").len(), 2);
+    fn filter_matches_ids_and_labels() {
+        let entries = entries(&["Ships/List", "ships/create"]);
+        let labels = vec!["GET List".to_string(), "POST Create ship".to_string()];
+        let rows = build(&entries);
+        // A folder/id fragment that no longer appears in the label still matches.
+        assert_eq!(filter(&rows, &entries, &labels, "ships/list").len(), 2);
+        assert_eq!(filter(&rows, &entries, &labels, "SHIPS").len(), 4);
+        // A friendly name matches through the label.
+        assert_eq!(filter(&rows, &entries, &labels, "create ship").len(), 2);
+        assert!(filter(&rows, &entries, &labels, "missing").is_empty());
     }
 }
