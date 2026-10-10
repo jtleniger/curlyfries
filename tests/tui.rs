@@ -415,3 +415,70 @@ fn help_overlay_lists_the_bindings() {
     let closed = rendered(&mut app, 120, 40);
     assert!(!closed.contains("run the selected request"), "{closed}");
 }
+
+#[test]
+fn long_request_values_wrap_in_the_resolved_request() {
+    let server = StubServer::start(|_| Vec::new());
+    let token = "x".repeat(120);
+    let dir = project_fixture(
+        "tui-wrap-request",
+        &server,
+        &[(
+            "requests/ships/list.json",
+            &format!(
+                r#"{{ "method": "GET", "path": "/ships", "headers": {{ "Authorization": "Bearer {token}" }} }}"#
+            ),
+        )],
+    );
+    let mut app = open(&dir);
+    app.select_id("ships/list");
+    let screen = rendered(&mut app, 72, 50);
+    // A JWT-length value no longer runs off the right edge: it cannot appear
+    // whole on any single row of the wrapped pane...
+    assert!(!screen.contains(&token), "{screen}");
+    // ...but every character survives on its own wrapped row.
+    assert!(screen.contains(&token[..10]), "{screen}");
+    assert!(screen.contains(&token[token.len() - 10..]), "{screen}");
+    let _ = server.finish();
+}
+
+#[test]
+fn long_response_values_wrap_and_scroll_to_the_bottom() {
+    let value = |key: &str| format!("{}-end-{key}", "y".repeat(140));
+    let body = format!(
+        r#"{{"aaa":"{aaa}","bbb":"{bbb}","ccc":"{ccc}","ddd":"{ddd}","eee":"{eee}"}}"#,
+        aaa = value("aaa"),
+        bbb = value("bbb"),
+        ccc = value("ccc"),
+        ddd = value("ddd"),
+        eee = value("eee"),
+    );
+    let server = StubServer::start(move |_| vec![StubResponse::json(200, "OK", &body)]);
+    let dir = project_fixture(
+        "tui-wrap-response",
+        &server,
+        &[(
+            "requests/ships/list.json",
+            r#"{ "method": "GET", "path": "/ships" }"#,
+        )],
+    );
+    let mut app = open(&dir);
+    app.select_id("ships/list");
+    app.on_key(key(KeyCode::Enter));
+    app.wait_for_run(Duration::from_secs(5));
+
+    // The wrapped body is taller than the pane, so it must scroll; the top
+    // shows the first key, not the last.
+    let top = rendered(&mut app, 72, 50);
+    assert!(top.contains("end-aaa"), "{top}");
+    assert!(!top.contains("end-eee"), "{top}");
+
+    // `End` reaches the true bottom: wrapping no longer understates the height
+    // and pins the viewport at the first logical line.
+    app.on_key(key(KeyCode::End));
+    let bottom = rendered(&mut app, 72, 50);
+    assert!(bottom.contains("end-eee"), "{bottom}");
+    assert!(bottom.contains('}'), "{bottom}");
+    assert!(!bottom.contains("\"aaa\""), "{bottom}");
+    let _ = server.finish();
+}

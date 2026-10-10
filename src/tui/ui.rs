@@ -194,7 +194,9 @@ fn draw_request(app: &App, frame: &mut Frame, area: Rect, theme: &Theme) {
         .border_style(Style::default().fg(theme.dim))
         .title(format!("Request — {label} "));
     frame.render_widget(
-        Paragraph::new(app.request_lines().to_vec()).block(block),
+        Paragraph::new(app.request_lines().to_vec())
+            .wrap(Wrap { trim: false })
+            .block(block),
         area,
     );
 }
@@ -276,11 +278,18 @@ fn draw_response(app: &mut App, frame: &mut Frame, area: Rect, theme: &Theme) {
         return;
     }
 
-    let lines = app.response_body().to_vec();
-    let maximum = (lines.len() as u16).saturating_sub(body_area.height);
+    // Scroll is in wrapped rows, so bound it by the wrapped height, not the
+    // logical line count.
+    let maximum =
+        wrapped_rows(app.response_body(), body_area.width).saturating_sub(body_area.height);
     let scroll = app.response_scroll.min(maximum);
     app.response_scroll = scroll;
-    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), body_area);
+    frame.render_widget(
+        Paragraph::new(app.response_body().to_vec())
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        body_area,
+    );
 }
 
 /// Terminal rows `text` needs when word-wrapped to `width` columns.
@@ -307,6 +316,21 @@ fn wrapped_height(text: &str, width: u16) -> u16 {
         }
     }
     rows
+}
+
+/// Terminal rows `lines` need when word-wrapped to `width` columns.
+///
+/// Each [`Line`] is wrapped independently — the same as a paragraph rendering
+/// them as `\n`-separated rows — so summing their heights matches the pane.
+fn wrapped_rows(lines: &[Line<'static>], width: u16) -> u16 {
+    lines.iter().fold(0u16, |rows, line| {
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        rows.saturating_add(wrapped_height(&text, width))
+    })
 }
 
 /// Captures strip for the active scope.
