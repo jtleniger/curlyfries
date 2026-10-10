@@ -22,7 +22,7 @@ const FOOTER: &str = "↑↓ select · Enter run · e env · x clear · Tab body
 const HELP: [&str; 15] = [
     "↑ / k, ↓ / j      move the selection",
     "g / G             first / last request",
-    "Enter / r         run the selected request",
+    "Enter / r         run the selected request (picks array slots)",
     "e                 choose the environment",
     "x / X             clear captures (scope / every scope, y/n)",
     "/                 filter requests (Esc clears)",
@@ -65,6 +65,9 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
     }
     if app.env_picker.is_some() {
         draw_env_picker(app, frame, area, &theme);
+    }
+    if app.pick_prompt().is_some() {
+        draw_pick_modal(app, frame, area, &theme);
     }
     if app.confirm.is_some() {
         draw_confirm(app, frame, area, &theme);
@@ -403,6 +406,28 @@ fn draw_env_picker(app: &App, frame: &mut Frame, area: Rect, theme: &Theme) {
         .title("Environment");
     let items: Vec<Line<'static>> = app.env_choices().into_iter().map(Line::from).collect();
     let mut state = ListState::default().with_selected(app.env_picker);
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(block)
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+        popup,
+        &mut state,
+    );
+}
+
+/// Centred picker over one array variable's elements.
+fn draw_pick_modal(app: &App, frame: &mut Frame, area: Rect, theme: &Theme) {
+    let Some((title, options, selected)) = app.pick_prompt() else {
+        return;
+    };
+    let popup = centered(40, 50, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent))
+        .title(title);
+    let items: Vec<Line<'static>> = options.into_iter().map(Line::from).collect();
+    let mut state = ListState::default().with_selected(Some(selected));
     frame.render_stateful_widget(
         List::new(items)
             .block(block)

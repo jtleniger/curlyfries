@@ -373,6 +373,7 @@ pub fn runner<'a>(
         entries,
         env_name,
         env,
+        picks: curlyfries::variables::Variables::default(),
         session,
         client: curlyfries::execute::client(timeout),
         timeout,
@@ -387,7 +388,10 @@ pub fn project_fixture(label: &str, server: &StubServer, files: &[(&str, &str)])
     dir.write("curlyfries.json", r#"{ "defaultEnvironment": "dev" }"#);
     dir.write(
         "environments/dev.json",
-        &format!(r#"{{ "baseUrl": "{}", "limit": 2 }}"#, server.base_url),
+        &format!(
+            r#"{{ "baseUrl": {{ "value": "{}" }}, "limit": {{ "value": 2 }} }}"#,
+            server.base_url
+        ),
     );
     for (relative, contents) in files {
         dir.write(relative, contents);

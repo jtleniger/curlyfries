@@ -109,7 +109,7 @@ const SCAFFOLD: [(&str, &str); 4] = [
     ),
     (
         "environments/dev.json",
-        "{\n  \"baseUrl\": \"http://127.0.0.1:4000\"\n}\n",
+        "{\n  \"baseUrl\": { \"value\": \"http://127.0.0.1:4000\" }\n}\n",
     ),
     (".gitignore", ".curlyfries/\n"),
 ];
@@ -329,7 +329,10 @@ fn import_writes_a_runnable_project() {
         file(".gitignore", ".curlyfries/"),
         file(
             "environments/default.json",
-            &format!("{{\n  \"baseUrl\": \"{}\"\n}}", server.base_url),
+            &format!(
+                "{{\n  \"baseUrl\": {{\n    \"value\": \"{}\"\n  }}\n}}",
+                server.base_url
+            ),
         ),
         file(
             "requests/default/health.json",
@@ -425,6 +428,7 @@ fn import_writes_a_runnable_project() {
         env_name: Some("default"),
         env: &vars,
         session: &session,
+        picks: None,
     };
     let resolved =
         curlyfries::execute::render_request(&definition, &scopes).expect("health request renders");
@@ -484,7 +488,7 @@ paths:
     for (relative, contents) in [
         file(
             "environments/default.json",
-            &format!("{{\n  \"baseUrl\": \"http://{host}/api\"\n}}"),
+            &format!("{{\n  \"baseUrl\": {{\n    \"value\": \"http://{host}/api\"\n  }}\n}}"),
         ),
         file(
             "requests/system/ping.json",
@@ -527,6 +531,7 @@ paths:
         env_name: env_name.as_deref(),
         env: &vars,
         session: &session,
+        picks: None,
     };
     let resolved =
         curlyfries::execute::render_request(&definition, &scopes).expect("ping request renders");

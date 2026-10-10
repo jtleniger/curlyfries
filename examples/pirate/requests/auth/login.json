@@ -5,6 +5,6 @@
   "body": "${pirate}",
   "outputs": {
     "token": { "secret": true, "value": "response.body.access_token" },
-    "role": "response.body.user.role"
+    "role": { "value": "response.body.user.role" }
   }
 }

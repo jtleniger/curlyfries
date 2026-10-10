@@ -1,6 +1,7 @@
 {
-  "baseUrl": "http://127.0.0.1:4000",
-  "limit": 2,
+  "baseUrl": { "value": "http://127.0.0.1:4000" },
+  "limit": { "value": 2 },
+  "shipClasses": { "value": ["galleon", "frigate", "sloop", "man-o-war", "longship"] },
   "pirate": { "secret": true, "value": { "username": "silver", "password": "piecesof8" } },
   "admiral": { "secret": true, "value": { "username": "flint", "password": "blackbeard" } }
 }

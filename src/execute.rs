@@ -240,6 +240,12 @@ fn render_failure(
             env_keys: scopes.env_keys(),
             session_keys: scopes.session_keys(),
         },
+        RenderError::MissingPick(name) => Error::UnresolvedPick {
+            path: def.file.clone(),
+            pointer: pointer.to_string(),
+            value: raw.to_string(),
+            name,
+        },
         RenderError::NullInStringSlot(name) => Error::Schema {
             path: def.file.clone(),
             pointer: pointer.to_string(),
@@ -576,6 +582,21 @@ mod tests {
             env_name: Some("dev"),
             env,
             session,
+            picks: None,
+        }
+    }
+
+    /// [`scopes_of`] with chosen `${name[]}` values.
+    fn scopes_with_picks<'a>(
+        env: &'a Variables,
+        session: &'a Variables,
+        picks: &'a Variables,
+    ) -> Scopes<'a> {
+        Scopes {
+            env_name: Some("dev"),
+            env,
+            session,
+            picks: Some(picks),
         }
     }
 
@@ -666,7 +687,7 @@ mod tests {
                 "path": "/ships?limit=${limit}",
                 "headers": { "Authorization": "Bearer ${token}", "X-Num": "${limit}" },
                 "body": { "capacity": "${limit}", "label": "${empty}" },
-                "outputs": { "id": "response.body.id" }
+                "outputs": { "id": { "value": "response.body.id" } }
             }),
         )
         .unwrap();
@@ -693,6 +714,66 @@ mod tests {
             resolved.body.as_deref(),
             Some(r#"{"capacity":42,"label":""}"#)
         );
+    }
+
+    #[test]
+    fn render_request_substitutes_a_chosen_pick() {
+        let def = request::validate(
+            "ships/by-class",
+            Path::new("requests/ships/by-class.json"),
+            &json!({
+                "method": "GET",
+                "path": "/ships?class=${shipClasses[]}&limit=${limit}",
+                "headers": { "X-Class": "${shipClasses[]}" }
+            }),
+        )
+        .unwrap();
+        let env = vars(&[
+            ("baseUrl", json!("http://host:4000")),
+            ("limit", json!(2)),
+            ("shipClasses", json!(["galleon", "frigate"])),
+        ]);
+        let empty = Variables::default();
+        let picks = vars(&[("shipClasses[]", json!("frigate"))]);
+
+        let scopes = scopes_with_picks(&env, &empty, &picks);
+        let resolved = render_request(&def, &scopes).unwrap();
+        assert_eq!(resolved.url, "http://host:4000/ships?class=frigate&limit=2");
+        assert_eq!(resolved.headers[0].1, "frigate");
+
+        // Without a chosen value the render fails with a dedicated error.
+        let scopes = scopes_of(&env, &empty);
+        let err = render_request(&def, &scopes).unwrap_err();
+        match &err {
+            Error::UnresolvedPick {
+                pointer,
+                value,
+                name,
+                ..
+            } => {
+                assert_eq!(pointer, "/path");
+                assert_eq!(value, "/ships?class=${shipClasses[]}&limit=${limit}");
+                assert_eq!(name, "shipClasses");
+            }
+            other => panic!("wrong error: {other}"),
+        }
+        assert_eq!(err.exit_code(), 3);
+    }
+
+    #[test]
+    fn the_display_render_keeps_the_pick_placeholder() {
+        let def = request::validate(
+            "ships/by-class",
+            Path::new("requests/ships/by-class.json"),
+            &json!({ "method": "GET", "path": "/ships?class=${shipClasses[]}" }),
+        )
+        .unwrap();
+        let env = vars(&[("baseUrl", json!("http://host:4000"))]);
+        let empty = Variables::default();
+        let picks = vars(&[("shipClasses[]", json!("frigate"))]);
+        let scopes = scopes_with_picks(&env, &empty, &picks);
+        let display = render_request_display(&def, &scopes).unwrap();
+        assert_eq!(display.url, "http://host:4000/ships?class=${shipClasses[]}");
     }
 
     #[test]

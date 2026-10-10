@@ -1,0 +1,8 @@
+{
+  "name": "Ships of a picked class",
+  "method": "GET",
+  "path": "/ships?class=${shipClasses[]}&limit=${limit}",
+  "outputs": {
+    "classShipIds": { "value": "response.body[].id" }
+  }
+}

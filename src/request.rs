@@ -19,7 +19,8 @@ pub const METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD",
 pub struct Output {
     /// Variable name captured into the scope.
     pub name: String,
-    /// Expression evaluated against the response.
+    /// Expression evaluated against the response. May contain the `[]` map
+    /// step, which captures a JSON array.
     pub expression: String,
     /// Whether the captured value must not be echoed in the UI.
     pub secret: bool,
@@ -243,6 +244,50 @@ pub fn template_error(file: &Path, pointer: &str, problem: TemplateProblem, valu
     }
 }
 
+/// Pick names (`${name[]}` bases) used anywhere in `def`, first-seen order,
+/// deduplicated.
+pub fn pick_names(def: &RequestDef) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    collect_picks(&def.name, &mut names);
+    collect_picks(&def.path, &mut names);
+    for (key, value) in &def.headers {
+        collect_picks(key, &mut names);
+        collect_picks(value, &mut names);
+    }
+    if let Some(body) = &def.body {
+        collect_tree_picks(body, &mut names);
+    }
+    names
+}
+
+/// Appends the picks in `text` to `names`, skipping ones already present.
+fn collect_picks(text: &str, names: &mut Vec<String>) {
+    for name in template::pick_names(text) {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+}
+
+/// Appends the picks in every string of `value`, object keys included.
+fn collect_tree_picks(value: &Value, names: &mut Vec<String>) {
+    match value {
+        Value::String(text) => collect_picks(text, names),
+        Value::Object(map) => {
+            for (key, child) in map {
+                collect_picks(key, names);
+                collect_tree_picks(child, names);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_tree_picks(item, names);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,7 +329,10 @@ mod tests {
               "path": "/ships",
               "headers": { "Authorization": "Bearer ${token}", "X-Trace": "curlyfries" },
               "body": { "name": "${shipName}", "typed": 42 },
-              "outputs": { "shipId": "response.body.id", "shipName": "response.body.name" }
+              "outputs": {
+                "shipId": { "value": "response.body.id" },
+                "shipName": { "value": "response.body.name" }
+              }
             }"#,
         )
         .unwrap();
@@ -326,7 +374,7 @@ mod tests {
               "path": "/auth/login",
               "outputs": {
                 "token": { "secret": true, "value": "response.body.access_token" },
-                "role": "response.body.user.role",
+                "role": { "value": "response.body.user.role" },
                 "plain": { "secret": false, "value": "response.status" }
               }
             }"#,
@@ -430,11 +478,29 @@ mod tests {
                 other => panic!("wrong error for {text}: {other}"),
             }
         }
+        // Every `outputs` entry is an object holding a string expression.
+        let not_object = load(
+            "x",
+            r#"{ "method": "GET", "path": "/x", "outputs": { "a": 1 } }"#,
+        )
+        .unwrap_err();
+        match &not_object {
+            Error::Schema {
+                pointer, message, ..
+            } => {
+                assert_eq!(pointer, "/outputs/a");
+                assert_eq!(
+                    message,
+                    "must be an object with a `value` key (allowed: secret, value)"
+                );
+            }
+            other => panic!("wrong error: {other}"),
+        }
         assert!(
             reason(
                 &load(
                     "x",
-                    r#"{ "method": "GET", "path": "/x", "outputs": { "a": 1 } }"#
+                    r#"{ "method": "GET", "path": "/x", "outputs": { "a": { "value": 1 } } }"#
                 )
                 .unwrap_err()
             )
@@ -475,7 +541,7 @@ mod tests {
 
         let bad_expression = load(
             "x",
-            r#"{ "method": "GET", "path": "/x", "outputs": { "id": "response.nope" } }"#,
+            r#"{ "method": "GET", "path": "/x", "outputs": { "id": { "value": "response.nope" } } }"#,
         )
         .unwrap_err();
         match &bad_expression {
@@ -487,6 +553,29 @@ mod tests {
             }
             other => panic!("wrong error: {other}"),
         }
+    }
+
+    #[test]
+    fn picks_are_collected_across_every_slot_in_order() {
+        let def = load(
+            "ships/by-class",
+            r#"{
+              "name": "Ships of a ${classes[]}",
+              "method": "POST",
+              "path": "/ships?class=${classes[]}&other=${other[]}",
+              "headers": { "X-A": "${classes[]}", "${header[]}": "v" },
+              "body": { "deep": { "list": ["${body[]}", "${classes[]}"] } }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            pick_names(&def),
+            vec!["classes", "other", "header", "body"],
+            "first-seen order, deduplicated"
+        );
+
+        let plain = load("x", r#"{ "method": "GET", "path": "/x" }"#).unwrap();
+        assert!(pick_names(&plain).is_empty());
     }
 
     #[test]

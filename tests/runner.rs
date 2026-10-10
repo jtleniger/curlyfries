@@ -168,11 +168,11 @@ fn a_second_scope_keeps_its_own_variables() {
     dir.write("curlyfries.json", "{}");
     dir.write(
         "environments/dev.json",
-        &format!(r#"{{ "baseUrl": "{}" }}"#, server.base_url),
+        &format!(r#"{{ "baseUrl": {{ "value": "{}" }} }}"#, server.base_url),
     );
     dir.write(
         "environments/stage.json",
-        &format!(r#"{{ "baseUrl": "{}" }}"#, server.base_url),
+        &format!(r#"{{ "baseUrl": {{ "value": "{}" }} }}"#, server.base_url),
     );
     dir.write("requests/auth/login.json", LOGIN);
 

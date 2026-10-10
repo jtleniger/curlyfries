@@ -13,9 +13,11 @@ reuse them without logging in again.
   random values when nothing defines them.
 - **Captures** — `outputs` pull values out of a response body, a header or the
   status line and keep them for later requests (in this run or a later one).
-  Mark a value secret — an environment entry or an `outputs` entry written
-  `{ "secret": true, "value": … }` — and the UI shows `••••••` instead of it
-  while the real value is still substituted, sent and persisted.
+  The `[]` map step captures a whole array (`response.body.ships[].id`), and a
+  `${ships[]}` slot in a request opens a picker over that array so you choose the
+  element to send. Mark a value secret — an environment entry or an `outputs`
+  entry written `{ "value": …, "secret": true }` — and the UI shows `••••••`
+  instead of it while the real value is still substituted, sent and persisted.
 - **Loud failures** — an undefined variable, a missing output path or a broken
   `${` names the file, the JSON pointer and the value that caused it.
 
@@ -55,7 +57,9 @@ tree on the left. Select `auth/login` and press `Enter`: the response lands in
 the pane below and its `outputs` are captured under the `dev` scope, so `token`
 and `role` now resolve everywhere. Run `auth/me` next — its
 `Authorization: Bearer ${token}` header comes from that capture — then
-`ships/detail`, `ships/list`, `ships/create` and `ships/delete` the same way.
+`ships/detail`, `ships/list`, `ships/by-class`, `ships/create` and `ships/delete`
+the same way; `ships/by-class` asks you to pick one of the environment's
+`shipClasses` before it sends.
 
 Captures persist to `.curlyfries/session.json`, so a later launch needs no
 second login. Press `e` to pick the environment (`(none)` plus every
@@ -94,7 +98,7 @@ that failure appears in its own wrapped **Output error** section below the tabs.
 |---|---|
 | `↑`/`k`, `↓`/`j` | move the selection (folders are skipped) |
 | `g`, `G` | first / last request |
-| `Enter`, `r` | run the selected request; the status line, body and captures update in place |
+| `Enter`, `r` | run the selected request (a `${name[]}` slot opens a picker first); the status line, body and captures update in place |
 | `e` | choose the environment (`(none)` plus every `environments/*.json`) |
 | `x`, `X` | clear the active scope / every scope, each behind a `y/n` confirmation |
 | `/` | filter the tree; `Esc` clears, `Enter` keeps the filter |
@@ -125,10 +129,11 @@ curlyfries import <SPEC>  # write a project from an OpenAPI 3.x or Swagger 2.0 d
 
 `init` writes `curlyfries.json`, a sample `requests/ping.json`
 (`GET ${baseUrl}/ping`), `environments/dev.json` (with
-`"baseUrl": "http://127.0.0.1:4000"`) and a `.gitignore` holding `.curlyfries/`,
-printing each created file. It changes nothing when any of those four files
-already exists (exit `1`, `error: cannot initialize a curlyfries project in
-<dir>`), and `-C` cannot be combined with `init` (usage error, exit `2`).
+`"baseUrl": { "value": "http://127.0.0.1:4000" }`) and a `.gitignore` holding
+`.curlyfries/`, printing each created file. It changes nothing when any of those
+four files already exists (exit `1`, `error: cannot initialize a curlyfries
+project in <dir>`), and `-C` cannot be combined with `init` (usage error,
+exit `2`).
 
 `import <SPEC>` reads a local OpenAPI 3.x or Swagger 2.0 document (JSON or
 YAML) and writes the same layout: one request file per operation under
@@ -183,7 +188,7 @@ hostile checkout can steer the client on its own. Set them in `curlyfries.json`:
 | `0` | the UI exited cleanly |
 | `1` | filesystem or environment: project not found, missing requests directory, IO, transport, timeout, refused redirect, not a terminal, unreadable session file, `init` or `import` finding existing files |
 | `2` | CLI usage error (from the argument parser) |
-| `3` | project or request definition: invalid JSON, schema violation, template error, undefined variable, output evaluation, unknown request id, invalid API document |
+| `3` | project or request definition: invalid JSON, schema violation, template error, undefined variable, unfilled pick, output evaluation, unknown request id, invalid API document |
 
 ## What failures look like
 
@@ -242,7 +247,7 @@ error: request timed out after 1s
 
 ```
 error: unreadable session file .curlyfries/session.json
-  reason: unsupported version 2 (expected 1)
+  reason: unsupported version 2 (expected 3)
   hint:  delete the file, or press x in the terminal UI to clear the captures
 ```
 

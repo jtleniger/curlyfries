@@ -547,7 +547,7 @@ mod tests {
             (MANIFEST_FILE, "{}"),
             ("requests/a.json", "{}"),
             ("outside/b.json", "{}"),
-            ("env/dev.json", r#"{ "baseUrl": "http://x" }"#),
+            ("env/dev.json", r#"{ "baseUrl": { "value": "http://x" } }"#),
         ]);
         dir.mkdir("environments");
         std::os::unix::fs::symlink(dir.child("outside"), dir.child("requests/extra"))
@@ -673,10 +673,13 @@ mod tests {
         // manifest default.
         let dir = project_with(&[
             (MANIFEST_FILE, r#"{ "defaultEnvironment": "stage" }"#),
-            ("environments/dev.json", r#"{ "baseUrl": "http://dev" }"#),
+            (
+                "environments/dev.json",
+                r#"{ "baseUrl": { "value": "http://dev" } }"#,
+            ),
             (
                 "environments/stage.json",
-                r#"{ "baseUrl": "http://stage" }"#,
+                r#"{ "baseUrl": { "value": "http://stage" } }"#,
             ),
         ]);
         let project = discover(dir.path(), None).unwrap();
@@ -690,7 +693,7 @@ mod tests {
         // the only environment.
         let single = project_with(&[
             (MANIFEST_FILE, "{}"),
-            ("environments/only.json", r#"{ "a": 1 }"#),
+            ("environments/only.json", r#"{ "a": { "value": 1 } }"#),
         ]);
         let project = discover(single.path(), None).unwrap();
         let (name, vars) = resolve_environment(&project).unwrap().unwrap();
@@ -724,7 +727,10 @@ mod tests {
     fn environment_names_are_validated_on_load() {
         let dir = project_with(&[
             (MANIFEST_FILE, "{}"),
-            ("environments/my env.json", r#"{ "baseUrl": "http://x" }"#),
+            (
+                "environments/my env.json",
+                r#"{ "baseUrl": { "value": "http://x" } }"#,
+            ),
             ("environments/dev.json", "{}"),
         ]);
         let project = discover(dir.path(), None).unwrap();
@@ -762,7 +768,7 @@ mod tests {
             (MANIFEST_FILE, "{}"),
             (
                 "environments/dev.json",
-                r#"{ "baseUrl": "http://${host}" }"#,
+                r#"{ "baseUrl": { "value": "http://${host}" } }"#,
             ),
         ]);
         let project = discover(dir.path(), None).unwrap();
@@ -774,14 +780,14 @@ mod tests {
     }
 
     #[test]
-    fn environment_secret_wrappers_unwrap_and_flag() {
+    fn environment_secret_entries_unwrap_and_flag() {
         let dir = project_with(&[
             (MANIFEST_FILE, "{}"),
             (
                 "environments/dev.json",
                 r#"{
-                  "baseUrl": "http://127.0.0.1:4000",
-                  "limit": 2,
+                  "baseUrl": { "value": "http://127.0.0.1:4000" },
+                  "limit": { "value": 2 },
                   "pirate": { "secret": true, "value": { "username": "silver" } }
                 }"#,
             ),
@@ -801,18 +807,43 @@ mod tests {
         assert!(!vars.is_secret("limit"));
         assert_eq!(vars.secrets, ["pirate".to_string()].into_iter().collect());
 
-        // The `secret`-key rule makes a bare wrapper an error, located by pointer.
+        // Every entry must be an object; a bare `secret` key is a missing `value`.
         let err = load_environment(&project, "bad").unwrap_err();
         match &err {
             Error::Schema {
                 pointer, message, ..
             } => {
                 assert_eq!(pointer, "/pirate");
-                assert_eq!(message, "a secret value needs a `value` key");
+                assert_eq!(message, "missing `value` key");
             }
             other => panic!("wrong error: {other}"),
         }
         assert!(err.to_string().contains("environments/bad.json"), "{err}");
+    }
+
+    #[test]
+    fn environment_entries_must_be_objects() {
+        let dir = project_with(&[
+            (MANIFEST_FILE, "{}"),
+            (
+                "environments/dev.json",
+                r#"{ "limit": 2, "baseUrl": "http://x" }"#,
+            ),
+        ]);
+        let project = discover(dir.path(), None).unwrap();
+        let err = load_environment(&project, "dev").unwrap_err();
+        match &err {
+            Error::Schema {
+                pointer, message, ..
+            } => {
+                assert_eq!(pointer, "/limit");
+                assert_eq!(
+                    message,
+                    "must be an object with a `value` key (allowed: secret, value)"
+                );
+            }
+            other => panic!("wrong error: {other}"),
+        }
     }
 
     #[test]

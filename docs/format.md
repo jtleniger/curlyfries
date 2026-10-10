@@ -42,8 +42,8 @@ Ids are listed in sorted order.
     "crewCapacity": "${random.int.1.500}"
   },
   "outputs": {
-    "shipId": "response.body.id",
-    "shipName": "response.body.name"
+    "shipId": { "value": "response.body.id" },
+    "shipName": { "value": "response.body.name" }
   }
 }
 ```
@@ -55,7 +55,7 @@ Ids are listed in sorted order.
 | `path` | string | yes | may be templated. If, after templating, it starts with `http://` or `https://` it is used verbatim, otherwise it is joined to the `baseUrl` variable. |
 | `headers` | object of string → string | no | names and values may be templated. Order is preserved. |
 | `body` | any JSON | no | templated recursively, object keys included, then serialised compactly. `"body": null` means *no body*. A body without a `Content-Type` header gains `Content-Type: application/json`. |
-| `outputs` | object of name → expression | no | the value is the expression string, or `{ "secret": true, "value": "<expression>" }` to keep the capture out of the UI. Order is file order; keys are unique by construction. |
+| `outputs` | object of name → entry | no | every entry is `{ "value": "<expression>" }`; add `"secret": true` to keep the capture out of the UI. The expression may use the `[]` map step to capture a whole array (see [Outputs](#outputs-expressions)). Order is file order; keys are unique by construction. |
 
 Unknown keys are rejected with the allowed list, e.g.
 
@@ -81,6 +81,11 @@ Delimiter: `${name}`. Variable names match `[A-Za-z_][A-Za-z0-9_.-]*`
 | `}` on its own | a literal `}` |
 | `${x}}` | the value of `x`, then a literal `}` |
 
+`${name[]}` is a *pick* token rather than a variable: it names an array variable
+whose chosen element is substituted when the request is sent (see
+[Picks](#picks)). The base name follows the same rule, so `${[]}` and `${a[]b}`
+are still `invalid variable name` failures.
+
 Parse failures are reported when a request file is loaded — the UI loads every
 request at startup:
 
@@ -88,7 +93,7 @@ request at startup:
 |---|---|
 | `${` with no later `}` | `error: unterminated `${` in <file>` |
 | `${}` or `${ }` | `error: empty variable name in <file>` |
-| `${1x}`, `${a b}`, `${a/b}` | `error: invalid variable name in <file>` |
+| `${1x}`, `${a b}`, `${a/b}`, `${[]}`, `${a[]b}` | `error: invalid variable name in <file>` |
 
 Each failure also prints the `at:` JSON pointer, the `value:` string and a
 `hint:`:
@@ -106,7 +111,8 @@ If a string's trimmed form is exactly one placeholder and nothing else, the
 placeholder **is** the value, with its JSON type intact, and the surrounding
 whitespace is dropped. `"body": "${pirate}"` sends the `pirate` object, and
 `"limit": "${limit}"` with `limit = 2` sends the number `2` — the `/_debug/echo`
-example request in `examples/pirate` relies on exactly this.
+example request in `examples/pirate` relies on exactly this. A whole `${name[]}`
+pick behaves the same way, sending the chosen element with its own type.
 
 Slots that can only hold text — `path`, `name`, header names, header values and
 object keys inside `body` — always use the *string form* of a value instead:
@@ -157,7 +163,7 @@ can satisfy — until you run it. Random names parse like any other (they match
 
 ```
 expr  := "response" "." ( "status" | "body" path* | "headers" hkey )
-path  := "." ident | "[" integer "]" | '["' chars '"]'
+path  := "." ident | "[" integer "]" | '["' chars '"]' | "[]"
 hkey  := "." ident | '["' chars '"]'
 ident := [A-Za-z0-9_-]+
 ```
@@ -171,6 +177,8 @@ works, `.X-Total-Count` also works).
 | `response.status` | the status code, as a number |
 | `response.body` | the parsed body |
 | `response.body.pirates[0].name` | a nested value |
+| `response.body.ships[].id` | an array of every `id`: `[4, 7, 9]` |
+| `response.body.ships[]` | the array itself |
 | `response.body["odd.key"]` | a key that is not an identifier |
 | `response.headers.X-Total-Count` | the first value of a header, matched case-insensitively |
 
@@ -183,17 +191,55 @@ Evaluation rules and their failures:
 - An index out of range fails with `index [9] is out of range (length 2)`.
 - `.key` on a non-object or `[i]` on non-array fails with the actual type, e.g.
   `cannot index a string with [0] (expected an array)`.
+- `[]` is a *map* step: it applies the remaining steps to every element of an
+  array and collects the results, so `response.body.rows[].cells[]` nests. A map
+  over a non-array fails with
+  `cannot map over a string with [] (expected an array)`; the first failing
+  element aborts the whole expression and errors are not prefixed with its index.
 
 Expression *syntax* is validated at load time; *evaluation* happens after the
 response arrives. A failed output means the whole capture is refused: no
 variable from that request is stored, and the UI shows the failure in its own
 **Output error** section.
 
-An `outputs` entry may be wrapped as `{ "secret": true, "value": "<expression>" }`
-to mark the *captured value* secret, so a token is stored and usable but never
-echoed (see [Secret values](#secret-values)). A wrapper holding exactly
-`secret` and `value` is required; `secret: false` is allowed and behaves like the
-bare form.
+Every `outputs` entry is an object: `{ "value": "<expression>" }`, or
+`{ "value": "<expression>", "secret": true }` to mark the *captured value*
+secret, so a token is stored and usable but never echoed (see
+[Secret values](#secret-values)). `secret: false` is allowed and behaves like the
+absent flag. A missing `value`, a non-boolean `secret` or any other key is a
+schema error naming the offending key by JSON pointer, e.g.
+`unknown key `nope` (allowed: secret, value)`.
+
+## Picks
+
+A `${name[]}` placeholder in a request is a *pick* token: the request is not sent
+until you choose one element of the array variable `name`. The resolved request
+pane keeps the placeholder — it shows `${shipClasses[]}`, not a value — and
+pressing `Enter` on that request opens a picker listing the array's elements,
+strings printed bare and anything else as compact JSON. `↑`/`↓` move the
+highlight, `Enter` takes the element and sends the request, `Esc` closes the
+picker without sending.
+
+The chosen element is substituted into the request that is actually sent, with
+the same typing as any other placeholder: a whole `${name[]}` sends the element
+with its JSON type intact, and inside a longer string it uses the
+[string form](#whole-placeholders-and-string-form). Picks are looked up under the
+key `name[]`, ahead of the session store and the environment, so a pick never
+shadows a variable of the same name.
+
+Every `Enter` prompts again: choices are not remembered in the session file.
+
+A pick that cannot be offered fails before anything is sent:
+
+| situation | message |
+|---|---|
+| no variable `name` in any scope | `no array `name` for `${name[]}`` |
+| the value is not an array | `variable `name` is not an array` |
+| the array is empty | `array `name` is empty` |
+| `name` is a secret | `cannot pick from secret variable `name`` |
+
+Outside the terminal UI nothing can fill a pick slot, so a request that reaches
+one fails with `error: no value chosen for `name[]` in <file>` (exit `3`).
 
 ## Environments
 
@@ -203,22 +249,26 @@ naming the file. Files that are not `*.json` and dot-files are ignored.
 
 ```json
 {
-  "baseUrl": "http://127.0.0.1:4000",
-  "limit": 2,
+  "baseUrl": { "value": "http://127.0.0.1:4000" },
+  "limit": { "value": 2 },
   "pirate": { "secret": true, "value": { "username": "silver", "password": "piecesof8" } }
 }
 ```
 
-The document must be a JSON object; every entry becomes a variable and may hold
-any JSON type. An entry is written either as the value itself, or as a **secret
-wrapper** `{ "secret": true, "value": <any JSON> }`: the value is unwrapped and
-used exactly as if written bare, but the terminal UI never echoes it (see
-[Secret values](#secret-values)). The rule is blunt and positional — **an object
-with a top-level `secret` key is a wrapper, never a literal value** — so a
-literal object value must not carry a top-level `secret` key. A wrapper must hold
-exactly two keys, `secret` (a boolean) and `value`; anything else is a schema
-error naming the offending key by JSON pointer, e.g.
-`unknown key `password` in a secret value (allowed: secret, value)`.
+The document must be a JSON object; every entry becomes a variable whose `value`
+may hold any JSON type. Every entry is an object with a required `value` key and
+an optional boolean `secret` key: `{ "value": <any JSON> }`, or
+`{ "value": <any JSON>, "secret": true }` to keep the terminal UI from echoing it
+(see [Secret values](#secret-values)). `secret: false` is allowed and behaves
+like the absent flag. A missing `value`, a non-boolean `secret` or any other key
+is a schema error naming the offending key by JSON pointer, e.g.
+`unknown key `password` (allowed: secret, value)`. Because the entry is always an
+object, a literal object value is nested under `value`:
+`{ "value": { "secret": 1 } }` stores the object `{ "secret": 1 }`.
+
+An array value is a set of choices for a [pick](#picks):
+`"shipClasses": { "value": ["galleon", "frigate"] }` lets a `${shipClasses[]}`
+slot offer those two.
 
 Values are **literal**: environment files are never templated, so resolution
 stays one pass with no cycles. A derived value belongs in the environment file,
@@ -255,8 +305,8 @@ A secret is display-only. The value is substituted, sent and persisted exactly
 like any other; only the UI withholds it, printing the fixed mask `••••••` in its
 place. Secrets come from two places:
 
-- an environment entry wrapped as `{ "secret": true, "value": … }`; and
-- an `outputs` entry wrapped the same way, which makes the *captured* value
+- an environment entry written `{ "value": …, "secret": true }`; and
+- an `outputs` entry written the same way, which makes the *captured* value
   secret.
 
 In the resolved request pane every slot is rendered through the mask, so a
@@ -272,12 +322,12 @@ Captured variables are persisted in `<root>/.curlyfries/session.json`:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "updatedAtUnix": 1759276800,
   "varScopes": {
     "dev": {
-      "token": { "secret": true, "value": "eyJ…" },
-      "shipId": 6
+      "token": { "value": "eyJ…", "secret": true },
+      "shipId": { "value": 6 }
     }
   }
 }
@@ -286,18 +336,18 @@ Captured variables are persisted in `<root>/.curlyfries/session.json`:
 - Scope keys are environment names, or `(none)` when no environment is selected.
   `(none)` cannot collide with an environment because parentheses are not valid
   in an environment name.
-- A **secret capture** is written in the same `{ "secret": true, "value": … }`
-  wrapper as an environment entry; a plain capture is written bare. Secret
-  captures are stored in plaintext, so a chain that uses a captured token still
-  resolves after a restart.
-- `version` must be `2`, `updatedAtUnix` is a Unix epoch second and every
+- Every capture is written in the same object form as an environment entry:
+  `{ "value": … }`, or `{ "value": …, "secret": true }` for a secret capture.
+  Secret captures are stored in plaintext, so a chain that uses a captured token
+  still resolves after a restart.
+- `version` must be `3`, `updatedAtUnix` is a Unix epoch second and every
   `varScopes` value must be an object. Unknown keys, an unknown version and
   malformed values are errors — never silent discards — that suggest clearing
   the captures from the UI:
 
 ```
 error: unreadable session file .curlyfries/session.json
-  reason: unsupported version 1 (expected 2)
+  reason: unsupported version 2 (expected 3)
   hint:  delete the file, or press x in the terminal UI to clear the captures
 ```
 
@@ -316,7 +366,7 @@ error: unreadable session file .curlyfries/session.json
 | `0` | the UI exited cleanly |
 | `1` | filesystem or environment: project not found, missing requests directory, IO, transport, timeout, refused redirect, not a terminal, unreadable session file |
 | `2` | CLI usage error (from the argument parser) |
-| `3` | project or request definition: invalid JSON, schema violation, template error, undefined variable, output evaluation, unknown request id |
+| `3` | project or request definition: invalid JSON, schema violation, template error, undefined variable, unfilled pick, output evaluation, unknown request id |
 
 ## Worked example: the Pirate API
 
@@ -327,7 +377,8 @@ error: unreadable session file .curlyfries/session.json
 | `auth/login` | `body: "${pirate}"` (a whole-placeholder object, and a secret environment value) and capturing `token` (secret) and `role` |
 | `auth/login-admiral` | a second login capturing `admiralToken` (secret) for the admiral-only routes |
 | `auth/me` | `Authorization: Bearer ${token}` resolved from the session |
-| `ships/list` | `limit=${limit}` from the environment plus a header capture (`shipCount`) |
+| `ships/list` | `limit=${limit}` from the environment plus a header capture (`shipCount`) and an array capture (`shipNames` = `response.body[].name`) |
+| `ships/by-class` | `/ships?class=${shipClasses[]}&limit=${limit}`: `Enter` opens a picker over the environment's `shipClasses` array, and the response's ship ids are captured as an array (`classShipIds` = `response.body[].id`) |
 | `ships/detail` | nested capture `response.body.pirates[0].name` |
 | `ships/create` | `Authorization` + an inline body built from `${random.string.8}` and `${random.int.1.500}`, capturing `shipId` and `shipName` |
 | `ships/delete` | `DELETE /ships/${shipId}` with the admiral token |
@@ -350,5 +401,5 @@ error: output `shipId` failed in requests/ships/create.json
 
 The loud answer, rather than a silently missing `shipId`. From the UI, open the
 project, select `auth/login` and press `Enter`, then run the chained requests
-(`ships/detail`, `ships/list`, …) the same way. Captures persist in
-`.curlyfries/session.json` between runs.
+(`ships/detail`, `ships/list`, `ships/by-class`, …) the same way. Captures
+persist in `.curlyfries/session.json` between runs.

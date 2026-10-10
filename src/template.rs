@@ -4,6 +4,10 @@
 //! the literal text `${` (consuming all three characters), and any other `$` is
 //! a literal `$`. A lone `}` is a literal `}`.
 //!
+//! `${name[]}` is a *pick* token: it names an array variable whose chosen
+//! element is substituted just before the request is sent. It resolves through
+//! the lookup alone — never the `random.` built-ins — under the key `name[]`.
+//!
 //! Two renderings exist. [`Template::render_native`] keeps JSON typing for a
 //! *whole placeholder* (a string whose trimmed form is exactly one placeholder
 //! and nothing else) and falls back to [`Template::render_string`] otherwise.
@@ -31,6 +35,8 @@ pub enum Segment {
     Literal(String),
     /// A `${name}` placeholder.
     Var(String),
+    /// A `${name[]}` pick token; the string is the base name, e.g. `types`.
+    Pick(String),
 }
 
 /// A parsed template.
@@ -46,6 +52,9 @@ pub enum RenderError {
     /// No scope provided the variable.
     #[error("undefined variable `{0}`")]
     MissingVar(String),
+    /// A `${name[]}` pick slot had no chosen value.
+    #[error("no value chosen for `{0}[]`")]
+    MissingPick(String),
     /// A `null` value was used where a string is required.
     #[error("variable `{0}` is null")]
     NullInStringSlot(String),
@@ -88,13 +97,20 @@ pub fn parse(input: &str) -> Result<Template, TemplateProblem> {
                 if name.is_empty() {
                     return Err(TemplateProblem::EmptyName);
                 }
-                if !is_valid_name(&name) {
+                let segment = if let Some(base) = name.strip_suffix("[]") {
+                    if !is_valid_name(base) {
+                        return Err(TemplateProblem::InvalidName);
+                    }
+                    Segment::Pick(base.to_string())
+                } else if is_valid_name(&name) {
+                    Segment::Var(name)
+                } else {
                     return Err(TemplateProblem::InvalidName);
-                }
+                };
                 if !literal.is_empty() {
                     segments.push(Segment::Literal(std::mem::take(&mut literal)));
                 }
-                segments.push(Segment::Var(name));
+                segments.push(segment);
                 i = end + 1;
                 continue;
             }
@@ -108,7 +124,7 @@ pub fn parse(input: &str) -> Result<Template, TemplateProblem> {
 
     let trimmed = input.trim();
     let whole = if trimmed.len() == input.len() {
-        segments.len() == 1 && matches!(segments.first(), Some(Segment::Var(_)))
+        segments.len() == 1 && matches!(segments.first(), Some(Segment::Var(_) | Segment::Pick(_)))
     } else if trimmed.is_empty() {
         false
     } else {
@@ -116,14 +132,11 @@ pub fn parse(input: &str) -> Result<Template, TemplateProblem> {
         parse(trimmed).map(|t| t.whole).unwrap_or(false)
     };
     if whole {
-        let name = segments
-            .iter()
-            .find_map(|s| match s {
-                Segment::Var(name) => Some(name.clone()),
-                Segment::Literal(_) => None,
-            })
-            .unwrap_or_else(|| unreachable!("whole templates hold exactly one variable"));
-        segments = vec![Segment::Var(name)];
+        let single = segments
+            .into_iter()
+            .find(|s| matches!(s, Segment::Var(_) | Segment::Pick(_)))
+            .unwrap_or_else(|| unreachable!("whole templates hold exactly one placeholder"));
+        segments = vec![single];
     }
 
     Ok(Template { segments, whole })
@@ -152,17 +165,23 @@ impl Template {
 
     /// Whether the template contains no placeholder at all.
     pub fn is_literal(&self) -> bool {
-        !self.segments.iter().any(|s| matches!(s, Segment::Var(_)))
+        !self
+            .segments
+            .iter()
+            .any(|s| matches!(s, Segment::Var(_) | Segment::Pick(_)))
     }
 
     /// Renders with JSON typing: a whole placeholder yields its value untouched,
     /// anything else yields an interpolated string.
     pub fn render_native(&self, lookup: Lookup<'_>) -> Result<Value, RenderError> {
         if self.whole {
-            let Segment::Var(name) = &self.segments[0] else {
-                unreachable!("whole templates hold exactly one variable")
+            return match &self.segments[0] {
+                Segment::Var(name) => resolve(name, lookup),
+                Segment::Pick(name) => resolve_pick(name, lookup),
+                Segment::Literal(_) => {
+                    unreachable!("whole templates hold exactly one placeholder")
+                }
             };
-            return resolve(name, lookup);
         }
         Ok(Value::String(self.render_string(lookup)?))
     }
@@ -177,10 +196,31 @@ impl Template {
                     let value = resolve(name, lookup)?;
                     out.push_str(&string_form(name, &value)?);
                 }
+                Segment::Pick(name) => {
+                    let value = resolve_pick(name, lookup)?;
+                    out.push_str(&string_form(name, &value)?);
+                }
             }
         }
         Ok(out)
     }
+}
+
+/// The `${name[]}` bases in `text`, in first-seen order.
+///
+/// A parse failure yields an empty list: the file was already validated at load.
+pub fn pick_names(text: &str) -> Vec<String> {
+    let Ok(parsed) = parse(text) else {
+        return Vec::new();
+    };
+    parsed
+        .segments
+        .iter()
+        .filter_map(|segment| match segment {
+            Segment::Pick(name) => Some(name.clone()),
+            Segment::Literal(_) | Segment::Var(_) => None,
+        })
+        .collect()
 }
 
 /// Resolves one variable name: the scopes first, then the `random.` built-ins.
@@ -192,6 +232,11 @@ fn resolve(name: &str, lookup: Lookup<'_>) -> Result<Value, RenderError> {
         Some(result) => result.map_err(RenderError::from),
         None => Err(RenderError::MissingVar(name.to_string())),
     }
+}
+
+/// Resolves a pick token: the chosen element is looked up under `name[]`.
+fn resolve_pick(name: &str, lookup: Lookup<'_>) -> Result<Value, RenderError> {
+    lookup(&format!("{name}[]")).ok_or_else(|| RenderError::MissingPick(name.to_string()))
 }
 
 /// The string form of a value (see the module docs).
@@ -397,6 +442,68 @@ mod tests {
         assert_eq!(parse("${a b}").unwrap_err(), TemplateProblem::InvalidName);
         assert_eq!(parse("${a/b}").unwrap_err(), TemplateProblem::InvalidName);
         assert_eq!(parse("${a-b_c.d1}").unwrap().segments().len(), 1);
+    }
+
+    #[test]
+    fn pick_tokens_parse_as_picks() {
+        let t = parse("${types[]}").unwrap();
+        assert_eq!(t.segments(), &[Segment::Pick("types".into())]);
+        assert!(t.is_whole());
+        assert!(!t.is_literal());
+        // Surrounding whitespace is trimmed like any other placeholder.
+        let spaced = parse(" ${types[]} ").unwrap();
+        assert_eq!(spaced.segments(), &[Segment::Pick("types".into())]);
+        assert!(spaced.is_whole());
+        // Inside a longer string the pick is one segment among many.
+        let mixed = parse("/ships?class=${types[]}&x=1").unwrap();
+        assert_eq!(
+            mixed.segments(),
+            &[
+                Segment::Literal("/ships?class=".into()),
+                Segment::Pick("types".into()),
+                Segment::Literal("&x=1".into()),
+            ]
+        );
+        assert!(!mixed.is_whole());
+
+        // `[]` alone and a `[]` in the middle are still invalid names.
+        assert_eq!(parse("${[]}").unwrap_err(), TemplateProblem::InvalidName);
+        assert_eq!(parse("${a[]b}").unwrap_err(), TemplateProblem::InvalidName);
+        assert_eq!(parse("${[]x}").unwrap_err(), TemplateProblem::InvalidName);
+    }
+
+    #[test]
+    fn pick_tokens_resolve_under_the_bracketed_key() {
+        let lookup = vars(&[("types[]", json!("frigate")), ("types", json!("ignored"))]);
+        // The chosen element is looked up under `name[]`, not `name`.
+        assert_eq!(render("${types[]}", &lookup).unwrap(), json!("frigate"));
+        assert_eq!(
+            parse("class=${types[]}")
+                .unwrap()
+                .render_string(&lookup)
+                .unwrap(),
+            "class=frigate"
+        );
+        // A whole pick keeps native typing.
+        let typed = vars(&[("types[]", json!(["a", 1]))]);
+        assert_eq!(render("${types[]}", &typed).unwrap(), json!(["a", 1]));
+        // No chosen value is a dedicated error.
+        assert_eq!(
+            render("${types[]}", &vars(&[("types", json!("ignored"))])).unwrap_err(),
+            RenderError::MissingPick("types".to_string())
+        );
+    }
+
+    #[test]
+    fn pick_names_are_collected_in_order() {
+        assert_eq!(pick_names("/ships?class=${types[]}"), vec!["types"]);
+        assert_eq!(pick_names("plain"), Vec::<String>::new());
+        assert_eq!(
+            pick_names("${a[]}-${b[]}-${a[]}"),
+            vec!["a", "b", "a"],
+            "duplicates are kept; the caller deduplicates"
+        );
+        assert_eq!(pick_names("${"), Vec::<String>::new());
     }
 
     #[test]

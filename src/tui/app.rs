@@ -9,6 +9,7 @@ use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use serde_json::Value;
 
 use crate::Map;
 use crate::error::Error;
@@ -63,6 +64,26 @@ enum EnvChoice {
     Named(String),
 }
 
+/// A request waiting for `${name[]}` choices before it is sent.
+struct PendingRun {
+    /// Index into `entries` of the request to send.
+    entry_index: usize,
+    /// Pick names still to choose, in first-seen order.
+    remaining: Vec<String>,
+    /// Chosen values, keyed `name[]`.
+    choices: Map,
+}
+
+/// The open picker for one array variable.
+struct PickModal {
+    /// Base name of the array variable, e.g. `shipClasses`.
+    name: String,
+    /// The array's elements, in order.
+    options: Vec<Value>,
+    /// Highlighted option.
+    selected: usize,
+}
+
 /// A finished run, sent from the worker thread.
 struct RunMsg {
     /// Scope the run was started in.
@@ -112,6 +133,10 @@ pub struct App {
     last: Option<LastRun>,
     env_choices: Vec<EnvChoice>,
     pub(crate) env_picker: Option<usize>,
+    /// A request waiting for `${name[]}` choices, if any.
+    pending: Option<PendingRun>,
+    /// The open picker for one array variable, if any.
+    pick_modal: Option<PickModal>,
     pub(crate) confirm: Option<PendingClear>,
     pub(crate) help: bool,
     pub(crate) status_message: Option<String>,
@@ -176,6 +201,8 @@ impl App {
             last: None,
             env_choices,
             env_picker: None,
+            pending: None,
+            pick_modal: None,
             confirm: None,
             help: false,
             status_message: None,
@@ -199,6 +226,10 @@ impl App {
         }
         if self.confirm.is_some() {
             self.confirm_key(key);
+            return;
+        }
+        if self.pick_modal.is_some() {
+            self.pick_key(key);
             return;
         }
         if self.env_picker.is_some() {
@@ -378,6 +409,17 @@ impl App {
             .collect()
     }
 
+    /// Title, options and selection of the open picker, if any.
+    pub(crate) fn pick_prompt(&self) -> Option<(String, Vec<String>, usize)> {
+        self.pick_modal.as_ref().map(|modal| {
+            (
+                format!("Pick {}", modal.name),
+                modal.options.iter().map(render::pick_label).collect(),
+                modal.selected,
+            )
+        })
+    }
+
     // --- key handling ------------------------------------------------------
 
     fn picker_key(&mut self, key: KeyEvent) {
@@ -391,6 +433,83 @@ impl App {
             KeyCode::Enter => self.apply_env_choice(),
             KeyCode::Esc => self.env_picker = None,
             _ => {}
+        }
+    }
+
+    /// Handles a key while the pick modal is up.
+    fn pick_key(&mut self, key: KeyEvent) {
+        let Some(modal) = self.pick_modal.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Up => modal.selected = modal.selected.saturating_sub(1),
+            KeyCode::Down => {
+                let last = modal.options.len().saturating_sub(1);
+                modal.selected = (modal.selected + 1).min(last);
+            }
+            KeyCode::Enter => {
+                let name = modal.name.clone();
+                let chosen = modal.options.get(modal.selected).cloned();
+                self.pick_modal = None;
+                if let (Some(chosen), Some(pending)) = (chosen, self.pending.as_mut()) {
+                    pending.choices.insert(format!("{name}[]"), chosen);
+                }
+                self.advance_pick();
+            }
+            KeyCode::Esc => {
+                self.pick_modal = None;
+                self.pending = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Opens the next picker, or sends the request once every pick is chosen.
+    fn advance_pick(&mut self) {
+        let Some(pending) = self.pending.as_mut() else {
+            return;
+        };
+        let next = if pending.remaining.is_empty() {
+            None
+        } else {
+            Some(pending.remaining.remove(0))
+        };
+        let Some(name) = next else {
+            let pending = self.pending.take().expect("pending is set");
+            self.spawn_run(pending.entry_index, pending.choices);
+            return;
+        };
+        match self.pick_options(&name) {
+            Ok(options) => {
+                self.pick_modal = Some(PickModal {
+                    name,
+                    options,
+                    selected: 0,
+                });
+            }
+            Err(message) => {
+                self.status_message = Some(message);
+                self.pending = None;
+            }
+        }
+    }
+
+    /// The elements to offer for the array variable `name`.
+    fn pick_options(&self, name: &str) -> Result<Vec<Value>, String> {
+        let scopes = Scopes {
+            env_name: self.env_name.as_deref(),
+            env: &self.env,
+            session: self.session.variables(self.scope()),
+            picks: None,
+        };
+        if scopes.is_secret(name) {
+            return Err(format!("cannot pick from secret variable `{name}`"));
+        }
+        match scopes.lookup(name) {
+            Some(Value::Array(items)) if !items.is_empty() => Ok(items.clone()),
+            Some(Value::Array(_)) => Err(format!("array `{name}` is empty")),
+            Some(_) => Err(format!("variable `{name}` is not an array")),
+            None => Err(format!("no array `{name}` for `${{{name}[]}}`")),
         }
     }
 
@@ -648,6 +767,7 @@ impl App {
                 env_name: self.env_name.as_deref(),
                 env: &self.env,
                 session: self.session.variables(self.scope()),
+                picks: None,
             };
             match execute::render_request_display(&self.defs[index], &scopes) {
                 Ok(request) => resolved_lines(&request, &theme),
@@ -705,11 +825,27 @@ impl App {
         let Some(index) = self.selected_entry() else {
             return;
         };
+        let names = request::pick_names(&self.defs[index]);
+        if names.is_empty() {
+            self.spawn_run(index, Map::new());
+            return;
+        }
+        self.pending = Some(PendingRun {
+            entry_index: index,
+            remaining: names,
+            choices: Map::new(),
+        });
+        self.advance_pick();
+    }
+
+    /// Starts the selected request on a worker thread with `choices` as picks.
+    fn spawn_run(&mut self, index: usize, choices: Map) {
         let id = self.entries[index].id.clone();
         let scope = self.scope().to_string();
         let (tx, rx) = std::sync::mpsc::channel();
         let (project, entries) = (self.project.clone(), self.entries.clone());
         let (env_name, env) = (self.env_name.clone(), self.env.clone());
+        let picks = Variables::from_values(choices);
         let timeout = self.timeout;
         std::thread::spawn(move || {
             let mut session = match Session::load(&project.root) {
@@ -728,6 +864,7 @@ impl App {
                 entries: &entries,
                 env_name: env_name.clone(),
                 env,
+                picks,
                 session: &mut session,
                 client: execute::client(timeout),
                 timeout,
@@ -801,6 +938,7 @@ fn wrap(value: isize, modulo: usize) -> usize {
 mod tests {
     use super::*;
     use crate::testutil::TempDir;
+    use serde_json::json;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -878,6 +1016,83 @@ mod tests {
         assert_eq!(app.response_tab, ResponseTab::Raw);
         app.on_key(key(KeyCode::Char('1')));
         assert_eq!(app.response_tab, ResponseTab::Body);
+    }
+
+    #[test]
+    fn pick_tokens_open_a_picker_before_sending() {
+        let dir = TempDir::new("app-pick");
+        dir.write("curlyfries.json", r#"{ "defaultEnvironment": "dev" }"#);
+        dir.write(
+            "environments/dev.json",
+            r#"{ "baseUrl": { "value": "http://127.0.0.1:1" }, "shipClasses": { "value": ["frigate", "sloop"] } }"#,
+        );
+        dir.write(
+            "requests/ships/list.json",
+            r#"{ "method": "GET", "path": "/ships?class=${shipClasses[]}" }"#,
+        );
+        let project = project::discover(dir.path(), None).unwrap();
+        let entries = project::collect_requests(&project).unwrap();
+        let mut app = App::new(project, entries).unwrap();
+
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.pick_prompt(),
+            Some((
+                "Pick shipClasses".to_string(),
+                vec!["frigate".to_string(), "sloop".to_string()],
+                0
+            ))
+        );
+        assert!(!app.is_running(), "nothing is sent until a pick is chosen");
+
+        // `Esc` closes the picker without running anything.
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.pick_prompt().is_none());
+        assert!(!app.is_running());
+    }
+
+    #[test]
+    fn pick_options_explain_every_refusal() {
+        let dir = TempDir::new("app-pick-errors");
+        dir.write("curlyfries.json", r#"{ "defaultEnvironment": "dev" }"#);
+        dir.write(
+            "environments/dev.json",
+            r#"{
+              "baseUrl": { "value": "http://127.0.0.1:1" },
+              "classes": { "value": ["frigate", "sloop"] },
+              "empty": { "value": [] },
+              "scalar": { "value": 3 },
+              "hidden": { "secret": true, "value": ["a"] }
+            }"#,
+        );
+        dir.write(
+            "requests/ping.json",
+            r#"{ "method": "GET", "path": "/ping" }"#,
+        );
+        let project = project::discover(dir.path(), None).unwrap();
+        let entries = project::collect_requests(&project).unwrap();
+        let app = App::new(project, entries).unwrap();
+
+        assert_eq!(
+            app.pick_options("classes").unwrap(),
+            vec![json!("frigate"), json!("sloop")]
+        );
+        assert_eq!(
+            app.pick_options("empty").unwrap_err(),
+            "array `empty` is empty"
+        );
+        assert_eq!(
+            app.pick_options("scalar").unwrap_err(),
+            "variable `scalar` is not an array"
+        );
+        assert_eq!(
+            app.pick_options("hidden").unwrap_err(),
+            "cannot pick from secret variable `hidden`"
+        );
+        assert_eq!(
+            app.pick_options("missing").unwrap_err(),
+            "no array `missing` for `${missing[]}`"
+        );
     }
 
     #[test]

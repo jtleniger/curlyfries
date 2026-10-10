@@ -20,7 +20,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::error::Error;
 use crate::project::{DEFAULT_ENVIRONMENTS_DIR, DEFAULT_REQUESTS_DIR, MANIFEST_FILE};
@@ -158,7 +158,7 @@ fn serialize(value: &Value) -> String {
 fn environment_value(doc: &Value, version: Version) -> Value {
     let mut map = Map::new();
     if let Some(url) = base_url(doc, version) {
-        map.insert("baseUrl".to_string(), Value::String(url));
+        map.insert("baseUrl".to_string(), json!({ "value": url }));
     }
     Value::Object(map)
 }

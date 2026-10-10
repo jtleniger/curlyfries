@@ -2,7 +2,10 @@
 //! `response.body<path>`.
 //!
 //! Expressions are parsed when a request file is loaded (so `list` reports
-//! syntax errors) and evaluated after a response arrives.
+//! syntax errors) and evaluated after a response arrives. Besides key and index
+//! steps, a body path may carry the `[]` *map* step, which applies the
+//! remaining steps to every element of an array and collects the results:
+//! `response.body.ships[].id` captures `[4, 7, 9]`.
 
 use serde_json::Value;
 use ureq::http::HeaderMap;
@@ -25,6 +28,8 @@ pub enum Step {
     Key(String),
     /// `[0]`
     Index(usize),
+    /// `[]`: map the remaining steps over each element of an array
+    Each,
 }
 
 /// The response as seen by output expressions.
@@ -40,6 +45,8 @@ pub struct ResponseView<'a> {
 }
 
 /// Parses an expression, returning a human-readable reason on failure.
+///
+/// A `response.body` path may contain the `[]` map step anywhere after `body`.
 pub fn parse(src: &str) -> Result<Expr, String> {
     let text = src.trim();
     let rest = text
@@ -90,7 +97,7 @@ fn parse_steps(mut tail: &str) -> Result<Vec<Step>, String> {
                 }
                 steps.push(Step::Key(key.to_string()));
             } else if inner.is_empty() {
-                return Err("empty `[]` in expression".to_string());
+                steps.push(Step::Each);
             } else {
                 let index: usize = inner
                     .parse()
@@ -180,38 +187,60 @@ pub fn evaluate(expr: &Expr, view: &ResponseView<'_>) -> Result<Value, String> {
                     "response body is not JSON (content-type: {content_type})"
                 ));
             };
-            let mut current = body;
-            for step in steps {
-                current = match step {
-                    Step::Key(key) => match current {
-                        Value::Object(map) => map.get(key).ok_or_else(|| {
-                            format!(
-                                "no key `{key}` in object (available: {})",
-                                available_keys(map)
-                            )
-                        })?,
-                        other => {
-                            return Err(format!(
-                                "cannot read key `{key}` of {} (expected an object)",
-                                type_name(other)
-                            ));
-                        }
-                    },
-                    Step::Index(index) => match current {
-                        Value::Array(items) => items.get(*index).ok_or_else(|| {
-                            format!("index [{index}] is out of range (length {})", items.len())
-                        })?,
-                        other => {
-                            return Err(format!(
-                                "cannot index {} with [{index}] (expected an array)",
-                                type_name(other)
-                            ));
-                        }
-                    },
-                };
-            }
-            Ok(current.clone())
+            walk(body, steps)
         }
+    }
+}
+
+/// Applies `steps` to `value`, mapping the rest over each element on `[]`.
+///
+/// The first failing element aborts the whole expression; errors are not
+/// prefixed with the element index.
+fn walk(value: &Value, steps: &[Step]) -> Result<Value, String> {
+    let Some((head, rest)) = steps.split_first() else {
+        return Ok(value.clone());
+    };
+    match head {
+        Step::Each => {
+            let Value::Array(items) = value else {
+                return Err(format!(
+                    "cannot map over {} with [] (expected an array)",
+                    type_name(value)
+                ));
+            };
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(walk(item, rest)?);
+            }
+            Ok(Value::Array(out))
+        }
+        Step::Key(key) => match value {
+            Value::Object(map) => {
+                let child = map.get(key).ok_or_else(|| {
+                    format!(
+                        "no key `{key}` in object (available: {})",
+                        available_keys(map)
+                    )
+                })?;
+                walk(child, rest)
+            }
+            other => Err(format!(
+                "cannot read key `{key}` of {} (expected an object)",
+                type_name(other)
+            )),
+        },
+        Step::Index(index) => match value {
+            Value::Array(items) => {
+                let child = items.get(*index).ok_or_else(|| {
+                    format!("index [{index}] is out of range (length {})", items.len())
+                })?;
+                walk(child, rest)
+            }
+            other => Err(format!(
+                "cannot index {} with [{index}] (expected an array)",
+                type_name(other)
+            )),
+        },
     }
 }
 
@@ -291,6 +320,23 @@ mod tests {
             parse("response.body.x-1").unwrap(),
             Expr::Body(vec![Step::Key("x-1".into())])
         );
+        assert_eq!(
+            parse("response.body.items[]").unwrap(),
+            Expr::Body(vec![Step::Key("items".into()), Step::Each])
+        );
+        assert_eq!(
+            parse("response.body[]").unwrap(),
+            Expr::Body(vec![Step::Each])
+        );
+        assert_eq!(
+            parse("response.body.rows[].cells[]").unwrap(),
+            Expr::Body(vec![
+                Step::Key("rows".into()),
+                Step::Each,
+                Step::Key("cells".into()),
+                Step::Each
+            ])
+        );
     }
 
     #[test]
@@ -305,8 +351,6 @@ mod tests {
             ("response.headers", "expected a header name"),
             ("response.headers.", "dangling `.`"),
             ("response.body[0", "unclosed `[`"),
-            ("response.body[]", "empty `[]`"),
-            ("response.body[]x]", "empty `[]`"),
             (r#"response.body["a]"#, "unterminated quoted key"),
             ("response.body[abc]", "not a non-negative integer index"),
             ("response.body.a b", "invalid path segment"),
@@ -377,6 +421,52 @@ mod tests {
         assert!(on_array.contains("expected an object"), "{on_array}");
         let on_object = evaluate_src("response.body.user[0]", &view).unwrap_err();
         assert!(on_object.contains("expected an array"), "{on_object}");
+    }
+
+    #[test]
+    fn evaluate_maps_arrays_with_the_each_step() {
+        let headers = HeaderMap::new();
+        let body = json!({
+            "items": [ { "id": 1 }, { "id": 2 } ],
+            "rows": [ { "cells": [1, 2] }, { "cells": [3] } ],
+            "name": "Curlyfries"
+        });
+        let body_view = view(200, &headers, &body);
+        assert_eq!(
+            evaluate_src("response.body.items[].id", &body_view).unwrap(),
+            json!([1, 2])
+        );
+        assert_eq!(
+            evaluate_src("response.body.items[]", &body_view).unwrap(),
+            json!([{ "id": 1 }, { "id": 2 }])
+        );
+        assert_eq!(
+            evaluate_src("response.body.rows[].cells[]", &body_view).unwrap(),
+            json!([[1, 2], [3]])
+        );
+        // A map over a non-array names the actual type.
+        let on_string = evaluate_src("response.body.name[]", &body_view).unwrap_err();
+        assert!(
+            on_string.contains("cannot map over a string with []"),
+            "{on_string}"
+        );
+        assert!(on_string.contains("expected an array"), "{on_string}");
+        let on_object = evaluate_src("response.body[]", &body_view).unwrap_err();
+        assert!(
+            on_object.contains("cannot map over an object with []"),
+            "{on_object}"
+        );
+        // A bad key inside a map fails exactly as it does outside one.
+        let bad_key = evaluate_src("response.body.items[].nope", &body_view).unwrap_err();
+        assert!(bad_key.contains("no key `nope`"), "{bad_key}");
+        assert!(bad_key.contains("available: id"), "{bad_key}");
+        // Mapping over an empty array yields an empty array.
+        let no_items = json!({ "items": [] });
+        let empty = view(200, &headers, &no_items);
+        assert_eq!(
+            evaluate_src("response.body.items[].id", &empty).unwrap(),
+            json!([])
+        );
     }
 
     #[test]

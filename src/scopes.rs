@@ -1,7 +1,8 @@
 //! Variable scopes and their precedence.
 //!
-//! Lookup order for `${name}` is the session store (persisted captures plus
-//! captures from this invocation), then the selected environment.
+//! [`Scopes::lookup`] resolves a placeholder token: chosen picks (`name[]`),
+//! then the session store (persisted captures plus captures from this
+//! invocation), then the selected environment.
 
 use serde_json::Value;
 
@@ -16,12 +17,17 @@ pub struct Scopes<'a> {
     pub env: &'a Variables,
     /// Variables captured in this scope (this invocation sees its own writes).
     pub session: &'a Variables,
+    /// Chosen `${name[]}` values, keyed `name[]`.
+    pub picks: Option<&'a Variables>,
 }
 
 impl<'a> Scopes<'a> {
     /// Resolves a variable name across the scopes.
     pub fn lookup(&self, name: &str) -> Option<&'a Value> {
-        self.session.get(name).or_else(|| self.env.get(name))
+        self.picks
+            .and_then(|picks| picks.get(name))
+            .or_else(|| self.session.get(name))
+            .or_else(|| self.env.get(name))
     }
 
     /// Whether the name that wins in [`Scopes::lookup`] is secret.
@@ -44,11 +50,19 @@ impl<'a> Scopes<'a> {
 
     /// A closure that resolves like [`Scopes::lookup_fn`] but replaces every
     /// secret value with [`SECRET_MASK`], for anything the UI echoes.
+    ///
+    /// A `${name[]}` pick token renders as itself: the resolved view keeps the
+    /// placeholder so the UI can offer the picker.
     pub fn display_lookup_fn(&self) -> impl Fn(&str) -> Option<Value> + '_ {
         let this = self;
-        move |name: &str| match this.lookup(name) {
-            Some(_) if this.is_secret(name) => Some(Value::String(SECRET_MASK.to_string())),
-            other => other.cloned(),
+        move |name: &str| {
+            if let Some(base) = name.strip_suffix("[]") {
+                return Some(Value::String(format!("${{{base}[]}}")));
+            }
+            match this.lookup(name) {
+                Some(_) if this.is_secret(name) => Some(Value::String(SECRET_MASK.to_string())),
+                other => other.cloned(),
+            }
         }
     }
 
@@ -91,6 +105,7 @@ mod tests {
             env_name: Some("dev"),
             env: &env,
             session: &session,
+            picks: None,
         };
         assert_eq!(scopes.lookup("token"), Some(&json!("session")));
         assert_eq!(scopes.lookup("limit"), Some(&json!(10)));
@@ -115,6 +130,7 @@ mod tests {
             env_name: Some("dev"),
             env: &env,
             session: &session,
+            picks: None,
         };
 
         let display = scopes.display_lookup_fn();
@@ -140,6 +156,7 @@ mod tests {
             env_name: Some("dev"),
             env: &env,
             session: &session,
+            picks: None,
         };
         assert!(!scopes.is_secret("token"));
         assert_eq!(scopes.display_lookup_fn()("token"), Some(json!("session")));
@@ -152,6 +169,7 @@ mod tests {
             env_name: Some("dev"),
             env: &env,
             session: &session,
+            picks: None,
         };
         assert!(scopes.is_secret("token"));
         assert_eq!(
@@ -167,7 +185,50 @@ mod tests {
             env_name: Some("dev"),
             env: &env,
             session: &session,
+            picks: None,
         };
         assert!(scopes.is_secret("baseUrl"));
+    }
+
+    #[test]
+    fn picks_win_over_every_other_scope() {
+        let env = vars(&[("types[]", json!("env-pick")), ("limit", json!(2))]);
+        let session = vars(&[("types[]", json!("session-pick"))]);
+        let picks = vars(&[("types[]", json!("frigate"))]);
+        let scopes = Scopes {
+            env_name: Some("dev"),
+            env: &env,
+            session: &session,
+            picks: Some(&picks),
+        };
+        assert_eq!(scopes.lookup("types[]"), Some(&json!("frigate")));
+        assert_eq!(scopes.lookup_fn()("types[]"), Some(json!("frigate")));
+        // Without a chosen pick the session (then the environment) still answers.
+        let scopes = Scopes {
+            env_name: Some("dev"),
+            env: &env,
+            session: &session,
+            picks: None,
+        };
+        assert_eq!(scopes.lookup("types[]"), Some(&json!("session-pick")));
+        assert_eq!(scopes.lookup("limit"), Some(&json!(2)));
+    }
+
+    #[test]
+    fn the_display_lookup_keeps_pick_tokens_literal() {
+        let env = vars(&[("types", json!(["frigate", "sloop"]))]);
+        let session = vars(&[]);
+        let picks = vars(&[("types[]", json!("sloop"))]);
+        let scopes = Scopes {
+            env_name: Some("dev"),
+            env: &env,
+            session: &session,
+            picks: Some(&picks),
+        };
+        let display = scopes.display_lookup_fn();
+        // The resolved view keeps the placeholder even though a pick is supplied.
+        assert_eq!(display("types[]"), Some(json!("${types[]}")));
+        // The real lookup resolves the chosen element instead.
+        assert_eq!(scopes.lookup_fn()("types[]"), Some(json!("sloop")));
     }
 }

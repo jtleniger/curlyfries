@@ -18,7 +18,7 @@ const LOGIN: &str = r#"{
   "method": "POST",
   "path": "/auth/login",
   "body": { "username": "silver" },
-  "outputs": { "token": "response.body.access_token" }
+  "outputs": { "token": { "value": "response.body.access_token" } }
 }"#;
 
 const SHIPS: &str = r#"{
@@ -29,7 +29,7 @@ const SHIPS: &str = r#"{
 const CREATE: &str = r#"{
   "method": "POST",
   "path": "/ships",
-  "outputs": { "shipId": "response.body.id" }
+  "outputs": { "shipId": { "value": "response.body.id" } }
 }"#;
 
 /// A key press with no modifiers.
@@ -119,7 +119,7 @@ fn enter_runs_the_selected_request_and_shows_the_response() {
 
     assert_eq!(
         session_json(&dir)["varScopes"]["dev"]["token"],
-        json!("tok-123")
+        json!({ "value": "tok-123" })
     );
     let _ = server.finish();
 }
@@ -149,7 +149,7 @@ fn secret_values_are_masked_in_the_ui() {
     dir.write(
         "environments/dev.json",
         &format!(
-            r#"{{ "baseUrl": "{}", "apiKey": {{ "secret": true, "value": "s3cret" }} }}"#,
+            r#"{{ "baseUrl": {{ "value": "{}" }}, "apiKey": {{ "secret": true, "value": "s3cret" }} }}"#,
             server.base_url
         ),
     );
@@ -177,6 +177,65 @@ fn secret_values_are_masked_in_the_ui() {
         json!({ "secret": true, "value": "tok-123" })
     );
     let _ = server.finish();
+}
+
+#[test]
+fn pick_slots_open_a_picker_and_send_the_chosen_element() {
+    let server = StubServer::start(|_| vec![StubResponse::json(200, "OK", r#"[{"id":7}]"#)]);
+    let dir = project_fixture(
+        "tui-pick",
+        &server,
+        &[(
+            "requests/ships/list.json",
+            r#"{
+              "method": "GET",
+              "path": "/ships?class=${shipClasses[]}",
+              "outputs": { "ids": { "value": "response.body[].id" } }
+            }"#,
+        )],
+    );
+    dir.write(
+        "environments/dev.json",
+        &format!(
+            r#"{{ "baseUrl": {{ "value": "{}" }}, "shipClasses": {{ "value": ["frigate", "sloop"] }} }}"#,
+            server.base_url
+        ),
+    );
+    let mut app = open(&dir);
+    app.select_id("ships/list");
+
+    // The resolved request keeps the placeholder until a value is chosen.
+    let before = rendered(&mut app, 120, 40);
+    assert!(before.contains("class=${shipClasses[]}"), "{before}");
+
+    // `Esc` closes the picker without sending anything.
+    app.on_key(key(KeyCode::Enter));
+    let picking = rendered(&mut app, 120, 40);
+    assert!(picking.contains("Pick shipClasses"), "{picking}");
+    assert!(picking.contains("frigate"), "{picking}");
+    assert!(picking.contains("sloop"), "{picking}");
+    assert_eq!(server.request_count(), 0, "nothing is sent before the pick");
+    app.on_key(key(KeyCode::Esc));
+    assert!(
+        !rendered(&mut app, 120, 40).contains("Pick shipClasses"),
+        "Esc closes the picker"
+    );
+    assert_eq!(server.request_count(), 0, "Esc sends nothing");
+
+    // Down then Enter chooses the second element and sends it.
+    app.on_key(key(KeyCode::Enter));
+    app.on_key(key(KeyCode::Down));
+    app.on_key(key(KeyCode::Enter));
+    app.wait_for_run(Duration::from_secs(5));
+
+    let received = server.finish();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].method, "GET");
+    assert_eq!(received[0].target, "/ships?class=sloop");
+    assert_eq!(
+        session_json(&dir)["varScopes"]["dev"]["ids"],
+        json!({ "value": [7] })
+    );
 }
 
 #[test]
@@ -225,7 +284,7 @@ fn switching_environment_changes_the_scope() {
     );
     dir.write(
         "environments/prod.json",
-        &format!(r#"{{ "baseUrl": "{}" }}"#, server.base_url),
+        &format!(r#"{{ "baseUrl": {{ "value": "{}" }} }}"#, server.base_url),
     );
     let mut app = open(&dir);
     let before = rendered(&mut app, 120, 40);
@@ -272,7 +331,7 @@ fn clear_scope_needs_confirmation_and_removes_the_scope() {
     app.wait_for_run(Duration::from_secs(5));
     assert_eq!(
         session_json(&dir)["varScopes"]["dev"]["token"],
-        json!("tok-123")
+        json!({ "value": "tok-123" })
     );
 
     // `x` asks first and changes nothing on its own.
@@ -285,7 +344,7 @@ fn clear_scope_needs_confirmation_and_removes_the_scope() {
     );
     assert_eq!(
         session_json(&dir)["varScopes"]["dev"]["token"],
-        json!("tok-123")
+        json!({ "value": "tok-123" })
     );
 
     // `Esc` cancels and leaves the scope alone.
@@ -297,7 +356,7 @@ fn clear_scope_needs_confirmation_and_removes_the_scope() {
     );
     assert_eq!(
         session_json(&dir)["varScopes"]["dev"]["token"],
-        json!("tok-123")
+        json!({ "value": "tok-123" })
     );
 
     // `y` confirms and removes the active scope.
@@ -325,9 +384,9 @@ fn clear_all_removes_every_scope() {
     );
     dir.write(
         ".curlyfries/session.json",
-        r#"{ "version": 2, "updatedAtUnix": 1, "varScopes": {
-            "dev": { "token": "a" },
-            "stage": { "token": "b" }
+        r#"{ "version": 3, "updatedAtUnix": 1, "varScopes": {
+            "dev": { "token": { "value": "a" } },
+            "stage": { "token": { "value": "b" } }
         } }"#,
     );
     let mut app = open(&dir);
@@ -378,7 +437,7 @@ fn broken_session_file_is_an_error() {
     );
     dir.write(
         ".curlyfries/session.json",
-        r#"{ "version": 3, "updatedAtUnix": 1, "varScopes": {} }"#,
+        r#"{ "version": 4, "updatedAtUnix": 1, "varScopes": {} }"#,
     );
     let (project, entries) = build(&dir);
     let error = match App::new(project, entries) {
@@ -388,8 +447,25 @@ fn broken_session_file_is_an_error() {
     let text = error.to_string();
     assert!(text.contains("unreadable session file"), "{text}");
     assert!(
-        text.contains("unsupported version 3 (expected 2)"),
+        text.contains("unsupported version 4 (expected 3)"),
         "{text}"
+    );
+
+    // A file from the previous schema version is refused too.
+    dir.write(
+        ".curlyfries/session.json",
+        r#"{ "version": 2, "updatedAtUnix": 1, "varScopes": { "dev": { "token": "a" } } }"#,
+    );
+    let (project, entries) = build(&dir);
+    let error = match App::new(project, entries) {
+        Ok(_) => panic!("a v2 session file must fail"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported version 2 (expected 3)"),
+        "{error}"
     );
     let _ = server.finish();
 }

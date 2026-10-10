@@ -14,7 +14,7 @@
     "launchedYear": "${random.int.1400.2100}"
   },
   "outputs": {
-    "shipId": "response.body.id",
-    "shipName": "response.body.name"
+    "shipId": { "value": "response.body.id" },
+    "shipName": { "value": "response.body.name" }
   }
 }

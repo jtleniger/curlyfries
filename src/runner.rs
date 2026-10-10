@@ -20,6 +20,8 @@ pub struct Runner<'a> {
     pub env_name: Option<String>,
     /// Variables from the selected environment.
     pub env: Variables,
+    /// Chosen `${name[]}` values, keyed `name[]`.
+    pub picks: Variables,
     /// Capture store, persisted between invocations.
     pub session: &'a mut Session,
     /// HTTP agent.
@@ -62,6 +64,7 @@ impl Runner<'_> {
                 env_name: self.env_name.as_deref(),
                 env: &self.env,
                 session: self.session.variables(&scope),
+                picks: Some(&self.picks),
             };
             let resolved = execute::render_request(&def, &scopes)?;
             let display_url = execute::render_request_display(&def, &scopes)

@@ -9,7 +9,7 @@
     "flag": "${random.bool}"
   },
   "outputs": {
-    "echoMethod": "response.body.method",
-    "echoBody": "response.body.body"
+    "echoMethod": { "value": "response.body.method" },
+    "echoBody": { "value": "response.body.body" }
   }
 }

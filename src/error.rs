@@ -150,6 +150,18 @@ pub enum Error {
         /// Variables known from the session store (sorted).
         session_keys: Vec<String>,
     },
+    /// A `${name[]}` pick slot was rendered without a chosen value.
+    #[error("error: no value chosen for `{name}[]` in {path}\n  at:    {pointer}\n  value: {value}\n  hint:  run this request from the terminal UI to choose a value", path = path.display(), value = json_string(value))]
+    UnresolvedPick {
+        /// File holding the template.
+        path: PathBuf,
+        /// JSON pointer of the offending string.
+        pointer: String,
+        /// The raw string as written in the file.
+        value: String,
+        /// Base name of the array variable.
+        name: String,
+    },
     /// An `outputs` expression could not be evaluated.
     #[error("error: output `{key}` failed in {path}\n  expression: {expression}\n  reason: {reason}", path = path.display())]
     Output {
@@ -254,6 +266,7 @@ impl Error {
             | Error::Schema { .. }
             | Error::Template { .. }
             | Error::UndefinedVariable { .. }
+            | Error::UnresolvedPick { .. }
             | Error::Output { .. }
             | Error::MissingBaseUrl { .. }
             | Error::UnknownRequest { .. } => 3,
@@ -323,6 +336,17 @@ impl Error {
                 env,
                 env_keys,
                 session_keys,
+            },
+            Error::UnresolvedPick {
+                path,
+                pointer,
+                value,
+                name,
+            } => Error::UnresolvedPick {
+                path: short(path),
+                pointer,
+                value,
+                name,
             },
             Error::Output {
                 path,
@@ -434,6 +458,42 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("→ (none)"), "{text}");
+    }
+
+    #[test]
+    fn unresolved_pick_renders_with_a_hint() {
+        let err = Error::UnresolvedPick {
+            path: PathBuf::from("requests/ships/by-class.json"),
+            pointer: "/path".to_string(),
+            value: "/ships?class=${shipClasses[]}".to_string(),
+            name: "shipClasses".to_string(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.starts_with(
+                "error: no value chosen for `shipClasses[]` in requests/ships/by-class.json"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("at:    /path"), "{text}");
+        assert!(
+            text.contains("value: \"/ships?class=${shipClasses[]}\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("hint:  run this request from the terminal UI"),
+            "{text}"
+        );
+        assert_eq!(err.exit_code(), 3);
+
+        // Relativize shortens the path the same way the other errors do.
+        let relativized = err.relativize(std::path::Path::new("requests"));
+        match relativized {
+            Error::UnresolvedPick { path, .. } => {
+                assert_eq!(path, PathBuf::from("ships/by-class.json"));
+            }
+            other => panic!("wrong error: {other}"),
+        }
     }
 
     #[test]

@@ -13,7 +13,7 @@ const MANIFEST: &str = "{\n  \"defaultEnvironment\": \"dev\"\n}\n";
 const REQUEST: &str =
     "{\n  \"name\": \"Ping\",\n  \"method\": \"GET\",\n  \"path\": \"${baseUrl}/ping\"\n}\n";
 /// Starter environment: the local sample API address.
-const ENVIRONMENT: &str = "{\n  \"baseUrl\": \"http://127.0.0.1:4000\"\n}\n";
+const ENVIRONMENT: &str = "{\n  \"baseUrl\": { \"value\": \"http://127.0.0.1:4000\" }\n}\n";
 /// Starter ignore list: the capture store is machine-local state.
 pub(crate) const GITIGNORE: &str = ".curlyfries/\n";
 

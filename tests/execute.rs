@@ -39,6 +39,7 @@ fn send(
         env_name: Some("dev"),
         env: &env,
         session: &session,
+        picks: None,
     };
     let resolved = execute::render_request(def, &scopes)?;
     execute::execute(
@@ -378,9 +379,9 @@ fn captures_cover_nested_paths_status_and_headers() {
             "method": "GET",
             "path": "/ships/1",
             "outputs": {
-                "firstPirateName": "response.body.pirates[0].name",
-                "shipCount": "response.headers.x-total-count",
-                "status": "response.status"
+                "firstPirateName": { "value": "response.body.pirates[0].name" },
+                "shipCount": { "value": "response.headers.x-total-count" },
+                "status": { "value": "response.status" }
             }
         }),
     );
@@ -390,6 +391,7 @@ fn captures_cover_nested_paths_status_and_headers() {
         env_name: Some("dev"),
         env: &env,
         session: &session,
+        picks: None,
     };
     let resolved = execute::render_request(&request, &scopes).unwrap();
     let result = execute::execute(&execute::client(None), &resolved, None, false).unwrap();
@@ -404,6 +406,90 @@ fn captures_cover_nested_paths_status_and_headers() {
 }
 
 #[test]
+fn array_captures_map_over_a_response_array() {
+    let server = StubServer::start(|_| {
+        vec![support::StubResponse::json(
+            200,
+            "OK",
+            r#"{"items":[{"id":1},{"id":2}]}"#,
+        )]
+    });
+    let env = map(&[("baseUrl", json!(server.base_url))]);
+    let request = def(
+        "ships/list",
+        json!({
+            "method": "GET",
+            "path": "/ships",
+            "outputs": {
+                "ids": { "value": "response.body.items[].id" },
+                "items": { "value": "response.body.items[]" }
+            }
+        }),
+    );
+    let env = curlyfries::variables::Variables::from_values(env);
+    let session = curlyfries::variables::Variables::default();
+    let scopes = Scopes {
+        env_name: Some("dev"),
+        env: &env,
+        session: &session,
+        picks: None,
+    };
+    let resolved = execute::render_request(&request, &scopes).unwrap();
+    let result = execute::execute(&execute::client(None), &resolved, None, false).unwrap();
+    let captured = execute::capture(&request.outputs, &result, &request.file).unwrap();
+    assert_eq!(captured.get("ids"), Some(&json!([1, 2])));
+    assert_eq!(
+        captured.get("items"),
+        Some(&json!([{ "id": 1 }, { "id": 2 }]))
+    );
+    let _ = server.finish();
+}
+
+#[test]
+fn mapping_over_a_non_array_fails_the_capture() {
+    let server = StubServer::start(|_| {
+        vec![support::StubResponse::json(
+            200,
+            "OK",
+            r#"{"name":"Curlyfries"}"#,
+        )]
+    });
+    let env = map(&[("baseUrl", json!(server.base_url))]);
+    let request = def(
+        "ships/list",
+        json!({
+            "method": "GET",
+            "path": "/ships",
+            "outputs": { "ids": { "value": "response.body.name[]" } }
+        }),
+    );
+    let env = curlyfries::variables::Variables::from_values(env);
+    let session = curlyfries::variables::Variables::default();
+    let scopes = Scopes {
+        env_name: Some("dev"),
+        env: &env,
+        session: &session,
+        picks: None,
+    };
+    let resolved = execute::render_request(&request, &scopes).unwrap();
+    let result = execute::execute(&execute::client(None), &resolved, None, false).unwrap();
+    let error = execute::capture(&request.outputs, &result, &request.file).unwrap_err();
+    match &error {
+        Error::Output { reason, .. } => {
+            assert!(
+                reason.contains("cannot map over a string with []"),
+                "{reason}"
+            );
+            assert!(reason.contains("expected an array"), "{reason}");
+        }
+        other => panic!("wrong error: {other}"),
+    }
+    // Nothing was captured, so the whole expression was refused.
+    assert!(session.is_empty());
+    let _ = server.finish();
+}
+
+#[test]
 fn failed_captures_store_nothing() {
     let server = StubServer::start(|_| vec![support::StubResponse::json(200, "OK", r#"{"id":6}"#)]);
     let env = map(&[("baseUrl", json!(server.base_url))]);
@@ -413,7 +499,10 @@ fn failed_captures_store_nothing() {
             "method": "POST",
             "path": "/ships",
             "body": {},
-            "outputs": { "shipId": "response.body.id", "nope": "response.body.missing" }
+            "outputs": {
+                "shipId": { "value": "response.body.id" },
+                "nope": { "value": "response.body.missing" }
+            }
         }),
     );
     let env = curlyfries::variables::Variables::from_values(env);
@@ -422,6 +511,7 @@ fn failed_captures_store_nothing() {
         env_name: Some("dev"),
         env: &env,
         session: &session,
+        picks: None,
     };
     let resolved = execute::render_request(&request, &scopes).unwrap();
     let result = execute::execute(&execute::client(None), &resolved, None, false).unwrap();

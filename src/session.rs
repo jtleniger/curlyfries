@@ -22,7 +22,7 @@ pub const SESSION_DIR: &str = ".curlyfries";
 /// Name of the session file.
 pub const SESSION_FILE: &str = "session.json";
 /// Format version written by this tool.
-pub const SESSION_VERSION: u32 = 2;
+pub const SESSION_VERSION: u32 = 3;
 /// Scope key used when no environment is selected.
 pub const NO_ENV_KEY: &str = "(none)";
 
@@ -143,17 +143,17 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// Serializes one scope: a secret name is written as a `secret` wrapper.
+/// Serializes one scope: every entry is an object, secret ones flagged.
 fn encode_scope(vars: &Variables) -> Map {
     vars.vars
         .iter()
         .map(|(name, value)| {
-            let value = if vars.secrets.contains(name) {
-                json!({ "secret": true, "value": value })
+            let entry = if vars.secrets.contains(name) {
+                json!({ "value": value, "secret": true })
             } else {
-                value.clone()
+                json!({ "value": value })
             };
-            (name.clone(), value)
+            (name.clone(), entry)
         })
         .collect()
 }
@@ -262,16 +262,16 @@ mod tests {
 
         let text = fs::read_to_string(&session.path).unwrap();
         assert!(text.ends_with("\n"), "{text}");
-        assert!(text.contains("\"version\": 2"), "{text}");
+        assert!(text.contains("\"version\": 3"), "{text}");
         assert!(text.contains("\"varScopes\""), "{text}");
         assert!(text.contains("\"updatedAtUnix\""), "{text}");
-        // A secret capture is stored wrapped; a plain one stays bare.
+        // Every capture is stored as an object; a secret one carries the flag.
         let parsed: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(
             parsed["varScopes"]["dev"]["token"],
-            json!({ "secret": true, "value": "abc" })
+            json!({ "value": "abc", "secret": true })
         );
-        assert_eq!(parsed["varScopes"]["dev"]["shipId"], json!(6));
+        assert_eq!(parsed["varScopes"]["dev"]["shipId"], json!({ "value": 6 }));
         assert!(
             !session
                 .path
@@ -295,12 +295,12 @@ mod tests {
     }
 
     #[test]
-    fn a_secret_capture_wrapper_is_read_and_a_bad_one_is_reported() {
+    fn a_secret_capture_is_read_and_a_bad_one_is_reported() {
         let dir = TempDir::new("session-secret-parse");
         dir.write(
             ".curlyfries/session.json",
-            r#"{ "version": 2, "updatedAtUnix": 1, "varScopes": {
-              "dev": { "token": { "secret": true, "value": "tok-123" }, "role": "admin" }
+            r#"{ "version": 3, "updatedAtUnix": 1, "varScopes": {
+              "dev": { "token": { "value": "tok-123", "secret": true }, "role": { "value": "admin" } }
             } }"#,
         );
         let session = Session::load(dir.path()).unwrap();
@@ -310,14 +310,14 @@ mod tests {
 
         dir.write(
             ".curlyfries/session.json",
-            r#"{ "version": 2, "updatedAtUnix": 1, "varScopes": {
+            r#"{ "version": 3, "updatedAtUnix": 1, "varScopes": {
               "dev": { "token": { "secret": true } }
             } }"#,
         );
         let err = Session::load(dir.path()).unwrap_err();
         let text = err.to_string();
         assert!(
-            text.contains("/varScopes/dev/token: a secret value needs a `value` key"),
+            text.contains("/varScopes/dev/token: missing `value` key"),
             "{text}"
         );
     }
@@ -332,7 +332,7 @@ mod tests {
         let err = Session::load(dir.path()).unwrap_err();
         assert!(
             err.to_string()
-                .contains("unsupported version 1 (expected 2)"),
+                .contains("unsupported version 1 (expected 3)"),
             "{err}"
         );
         assert!(err.to_string().contains("press x"), "{err}");
@@ -340,14 +340,25 @@ mod tests {
 
         dir.write(
             ".curlyfries/session.json",
-            r#"{ "version": 2, "updatedAtUnix": 1, "varScopes": {}, "extra": 1 }"#,
+            r#"{ "version": 2, "updatedAtUnix": 1, "varScopes": {} }"#,
+        );
+        let err = Session::load(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unsupported version 2 (expected 3)"),
+            "{err}"
+        );
+
+        dir.write(
+            ".curlyfries/session.json",
+            r#"{ "version": 3, "updatedAtUnix": 1, "varScopes": {}, "extra": 1 }"#,
         );
         let err = Session::load(dir.path()).unwrap_err();
         assert!(err.to_string().contains("unknown key `extra`"), "{err}");
 
         dir.write(
             ".curlyfries/session.json",
-            r#"{ "version": 2, "updatedAtUnix": 1, "varScopes": { "dev": 3 } }"#,
+            r#"{ "version": 3, "updatedAtUnix": 1, "varScopes": { "dev": 3 } }"#,
         );
         let err = Session::load(dir.path()).unwrap_err();
         assert!(
@@ -358,7 +369,7 @@ mod tests {
 
         dir.write(
             ".curlyfries/session.json",
-            r#"{ "version": "2", "updatedAtUnix": 1, "varScopes": {} }"#,
+            r#"{ "version": "3", "updatedAtUnix": 1, "varScopes": {} }"#,
         );
         let err = Session::load(dir.path()).unwrap_err();
         assert!(

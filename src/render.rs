@@ -42,6 +42,14 @@ pub fn compact(value: &Value) -> String {
     serde_json::to_string(value).expect("JSON values always serialize")
 }
 
+/// A pick option as printed in the picker: strings bare, anything else compact JSON.
+pub fn pick_label(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => compact(other),
+    }
+}
+
 /// A captured value as printed: the mask when secret, else compact JSON with
 /// strings truncated.
 pub fn captured_value(value: &Value, secret: bool) -> String {
@@ -148,6 +156,16 @@ mod tests {
             captured_value(&json!(over), false),
             compact(&Value::String(expected))
         );
+    }
+
+    #[test]
+    fn pick_labels_print_strings_bare_and_other_types_as_json() {
+        assert_eq!(pick_label(&json!("frigate")), "frigate");
+        assert_eq!(pick_label(&json!(7)), "7");
+        assert_eq!(pick_label(&json!(true)), "true");
+        assert_eq!(pick_label(&json!(null)), "null");
+        assert_eq!(pick_label(&json!(["a", 1])), "[\"a\",1]");
+        assert_eq!(pick_label(&json!({ "a": 1 })), "{\"a\":1}");
     }
 
     #[test]

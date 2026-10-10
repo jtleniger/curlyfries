@@ -1,12 +1,14 @@
-//! Variable entries: literal values plus the secret wrapper.
+//! Variable entries: a value wrapped in an object.
 //!
 //! A variable entry (an environment value, an `outputs` entry, or a session
-//! capture) is either a bare JSON value or a *secret wrapper*
-//! `{ "secret": true, "value": <any JSON> }`. A wrapper carries the value
-//! unchanged; only the terminal UI withholds it, printing [`SECRET_MASK`]
-//! instead. The detection rule is deliberately blunt: **an object with a
-//! top-level `secret` key is a wrapper**, so a literal object value can never
-//! itself carry a top-level `secret` key.
+//! capture) is always an object holding a required `value` key and an optional
+//! boolean `secret` key: `{ "value": <any JSON> }` or
+//! `{ "value": <any JSON>, "secret": true }`. The value is used unchanged; only
+//! the terminal UI withholds a secret, printing [`SECRET_MASK`] instead.
+//!
+//! Because `value` is required and unknown keys are refused, a literal object
+//! value is nested under `value` — `{ "value": { "secret": 1 } }` stores the
+//! object `{ "secret": 1 }` rather than being read as a wrapper.
 
 use std::collections::BTreeSet;
 
@@ -79,34 +81,32 @@ pub fn pointer_token(token: &str) -> String {
 ///
 /// `pointer` is the entry's JSON pointer (e.g. `/pirate`).
 pub fn split_entry(pointer: &str, value: &Value) -> Result<(Value, bool), EntryProblem> {
-    let Value::Object(wrapper) = value else {
-        return Ok((value.clone(), false));
+    let Value::Object(obj) = value else {
+        return Err(EntryProblem {
+            pointer: pointer.to_string(),
+            message: "must be an object with a `value` key (allowed: secret, value)".to_string(),
+        });
     };
-    let Some(secret) = wrapper.get("secret") else {
-        return Ok((value.clone(), false));
-    };
-    if let Some(key) = wrapper
-        .keys()
-        .find(|key| *key != "secret" && *key != "value")
-    {
+    if let Some(key) = obj.keys().find(|k| *k != "secret" && *k != "value") {
         return Err(EntryProblem {
             pointer: format!("{pointer}/{}", pointer_token(key)),
-            message: format!("unknown key `{key}` in a secret value (allowed: secret, value)"),
+            message: format!("unknown key `{key}` (allowed: secret, value)"),
         });
     }
-    let secret = match secret {
-        Value::Bool(flag) => *flag,
-        _ => {
+    let secret = match obj.get("secret") {
+        None => false,
+        Some(Value::Bool(flag)) => *flag,
+        Some(_) => {
             return Err(EntryProblem {
                 pointer: format!("{pointer}/secret"),
                 message: "`secret` must be a boolean".to_string(),
             });
         }
     };
-    let Some(value) = wrapper.get("value") else {
+    let Some(value) = obj.get("value") else {
         return Err(EntryProblem {
             pointer: pointer.to_string(),
-            message: "a secret value needs a `value` key".to_string(),
+            message: "missing `value` key".to_string(),
         });
     };
     Ok((value.clone(), secret))
@@ -138,65 +138,83 @@ mod tests {
     }
 
     #[test]
-    fn bare_values_stay_literal_and_plain() {
-        for value in [
-            json!("text"),
-            json!(7),
-            json!(true),
-            json!(null),
-            json!([1, 2]),
-            json!({ "username": "silver" }),
-        ] {
-            let (split, secret) = split_entry("/x", &value).unwrap();
-            assert_eq!(split, value);
-            assert!(!secret, "{value} must not be secret");
-        }
-    }
+    fn entries_are_objects_holding_a_value() {
+        let (value, secret) = split_entry("/x", &json!({ "value": "text" })).unwrap();
+        assert_eq!(value, json!("text"));
+        assert!(!secret);
 
-    #[test]
-    fn wrappers_unwrap_and_carry_the_flag() {
         let (value, secret) =
-            split_entry("/pirate", &json!({ "secret": true, "value": { "a": 1 } })).unwrap();
+            split_entry("/pirate", &json!({ "value": { "a": 1 }, "secret": true })).unwrap();
         assert_eq!(value, json!({ "a": 1 }));
         assert!(secret);
 
-        // `secret: false` still unwraps the value; it is just not secret.
+        // `secret: false` is allowed and behaves like the absent flag.
         let (value, secret) =
             split_entry("/x", &json!({ "secret": false, "value": "abc" })).unwrap();
         assert_eq!(value, json!("abc"));
         assert!(!secret);
 
         // A null value is allowed.
-        let (value, secret) = split_entry("/x", &json!({ "secret": true, "value": null })).unwrap();
+        let (value, secret) = split_entry("/x", &json!({ "value": null, "secret": true })).unwrap();
         assert_eq!(value, Value::Null);
         assert!(secret);
+
+        // Arrays and nested objects survive the unwrap.
+        let (value, _) = split_entry("/x", &json!({ "value": [1, { "a": true }] })).unwrap();
+        assert_eq!(value, json!([1, { "a": true }]));
     }
 
     #[test]
-    fn wrapper_problems_name_the_pointer() {
+    fn a_literal_object_value_nests_under_value() {
+        // `{"secret": 1}` is data, not a wrapper: the wrapper detection is gone.
+        let (value, secret) = split_entry("/x", &json!({ "value": { "secret": 1 } })).unwrap();
+        assert_eq!(value, json!({ "secret": 1 }));
+        assert!(!secret);
+
+        // ...and an object with a top-level `secret` key is now just a bad entry.
+        let err = split_entry("/x", &json!({ "secret": true })).unwrap_err();
+        assert_eq!(err.pointer, "/x");
+        assert_eq!(err.message, "missing `value` key");
+        let err = split_entry("/x", &json!({ "secret": false, "other": 1 })).unwrap_err();
+        assert_eq!(err.pointer, "/x/other");
+        assert_eq!(err.message, "unknown key `other` (allowed: secret, value)");
+    }
+
+    #[test]
+    fn non_objects_are_rejected_by_pointer() {
+        for value in [
+            json!("text"),
+            json!(7),
+            json!(true),
+            json!(null),
+            json!([1, 2]),
+        ] {
+            let err = split_entry("/dev/x", &value).unwrap_err();
+            assert_eq!(err.pointer, "/dev/x", "{value}");
+            assert_eq!(
+                err.message, "must be an object with a `value` key (allowed: secret, value)",
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn entry_problems_name_the_pointer() {
         let unknown =
-            split_entry("/pirate", &json!({ "secret": true, "value": 1, "nope": 2 })).unwrap_err();
+            split_entry("/pirate", &json!({ "value": 1, "secret": true, "nope": 2 })).unwrap_err();
         assert_eq!(unknown.pointer, "/pirate/nope");
         assert_eq!(
             unknown.message,
-            "unknown key `nope` in a secret value (allowed: secret, value)"
+            "unknown key `nope` (allowed: secret, value)"
         );
 
-        let not_bool = split_entry("/x", &json!({ "secret": "yes", "value": 1 })).unwrap_err();
+        let not_bool = split_entry("/x", &json!({ "value": 1, "secret": "yes" })).unwrap_err();
         assert_eq!(not_bool.pointer, "/x/secret");
         assert_eq!(not_bool.message, "`secret` must be a boolean");
 
         let no_value = split_entry("/x", &json!({ "secret": true })).unwrap_err();
         assert_eq!(no_value.pointer, "/x");
-        assert_eq!(no_value.message, "a secret value needs a `value` key");
-    }
-
-    #[test]
-    fn a_top_level_secret_key_is_a_wrapper_not_a_literal() {
-        // `{"secret": true}` looks like a literal object but is read as a
-        // (malformed) wrapper, by the blunt detection rule.
-        assert!(split_entry("/x", &json!({ "secret": true })).is_err());
-        assert!(split_entry("/x", &json!({ "secret": false, "other": 1 })).is_err());
+        assert_eq!(no_value.message, "missing `value` key");
     }
 
     #[test]
@@ -204,12 +222,12 @@ mod tests {
         let variables = split_document(
             "",
             &map(&[
-                ("limit", json!(2)),
+                ("limit", json!({ "value": 2 })),
                 (
                     "pirate",
                     json!({ "secret": true, "value": { "username": "silver" } }),
                 ),
-                ("admiral", json!({ "secret": true, "value": "flint" })),
+                ("admiral", json!({ "value": "flint", "secret": true })),
             ]),
         )
         .unwrap();
