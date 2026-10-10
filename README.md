@@ -68,48 +68,60 @@ second login. Press `e` to pick the environment (`(none)` plus every
 ## Terminal UI
 
 Running `curlyfries` opens a full-screen TUI: the request
-tree on the left, the resolved (or definition) request above the response, the
-active scope's captures below, and a key legend at the bottom. The resolved
-request labels each part — `url`, `headers`, `query` and `body` — and lists every
-header and query slot with its `[x]`/`[ ]` toggle state. Whenever a response
-arrives its status line is shown, even if an `outputs` expression then fails;
-that failure appears in its own wrapped **Output error** section below the tabs.
+tree on the left, the request pane above the response, the active scope's
+captures below, and a key legend at the bottom. `Tab` (and `Shift-Tab`) cycles
+the focus between those three panes, and the arrow keys (`k`/`j`), `PageUp`/
+`PageDown` and `Home`/`End` (`g`/`G`) then move the tree selection or scroll the
+focused pane by one line, ten lines or to the edge — the same keys everywhere.
+The resolved request labels each part — `url`, `headers`, `query` and `body` —
+and lists every header and query slot with its `[x]`/`[ ]` toggle state. The
+`url` spans the pane and `headers`/`query` sit beside the `body`, so a tall body
+scrolls instead of running past the pane (they stack into one column when the
+pane is too narrow). Whenever a response arrives its status line is shown, even
+if an `outputs` expression then fails; that failure appears in its own wrapped
+**Output error** section below the tabs.
 
 ```
-╭Requests──────────────────────────────╮╭Request — resolved ───────────────────╮
-│auth/                                 ││url                                   │
-│  POST login                          ││POST http://127.0.0.1:4000/auth/login │
-│ships/                                ││headers                               │
-│  GET list                            ││[x] Content-Type: application/json    │
-│                                      ││query                                 │
-│                                      ││(none)                                │
-│                                      ││body                                  │
-│                                      ││"••••••"                              │
-│                                      │╰──────────────────────────────────────╯
-│                                      │╭Response — http://…/auth/login────────╮
-│                                      ││← 200 OK  1ms                         │
-│                                      ││ 1 Body │ 2 Headers │ 3 Raw           │
-│                                      ││{ "access_token": "…" }               │
-╰──────────────────────────────────────╯╰──────────────────────────────────────╯
-╭Captures — dev─────────────────────────────────────────────╮
-│token = ••••••                                             │
-╰───────────────────────────────────────────────────────────╯
-↑↓ select · Enter run · e env · t toggle · x clear · Tab body/headers/raw · v definition/resolved · / filter · ? help · q quit
+╭Requests──────────────────────────────╮╭Request — resolved ───────────────────────────────────────╮
+│auth/                                 ││url                                                       │
+│  POST Log in as the pirate           ││POST http://127.0.0.1:4000/ships                          │
+│  POST Log in as the admiral          ││                                                          │
+│  GET Who am I?                       ││headers                     │body                         │
+│debug/                                ││[x] Authorization: Bearer   │{                            │
+│  POST Echo what the server received  ││••••••                      │  "name": "Curlyfries        │
+│  GET Slow endpoint (for --timeout)   ││[x] Content-Type:           │vIQcp4Qo",                   │
+│ships/                                ││application/json            │  "class": "frigate",        │
+│  GET Ships of a picked class         ││                            │  "crewCapacity": 139,       │
+│  POST Create a ship                  │╰──────────────────────────────────────────────────────────╯
+│  DELETE Delete the ship we just creat│╭Response — ───────────────────────────────────────────────╮
+│  GET Ship detail with crew and cargo ││                                                          │
+│  GET List ships                      ││ 1 Body │ 2 Headers │ 3 Raw                               │
+│  GET A ship that does not exist      ││                    press Enter to run                    │
+│                                      ││                                                          │
+│                                      ││                                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+╭Captures — dev────────────────────────────────────────────────────────────────────────────────────╮
+│shipCount = "5"                                                                                   │
+│shipNames = ["Saucy Sardine","Barnacle Betty","Tipsy Tortuga","Sea Serpent","Kraken's Revenge"]   │
+│token = ••••••                                                                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Tab focus · j/k move·scroll · Enter run · e env · t toggle · x clear · v view · [/] tab · / filter · ? help · q quit
 ```
 
 | key | effect |
 |---|---|
-| `↑`/`k`, `↓`/`j` | move the selection (folders are skipped) |
-| `g`, `G` | first / last request |
+| `Tab`, `Shift-Tab` | focus the next / previous pane (tree, request, response) |
+| `↑`/`k`, `↓`/`j` | move the tree selection, or scroll the focused pane by one line |
+| `PageUp`/`PageDown`, `Ctrl-u`/`Ctrl-d` | scroll the focused pane by ten lines |
+| `g`/`Home`, `G`/`End` | first / last request, or top / bottom of the focused pane |
 | `Enter`, `r` | run the selected request (a `${name[]}` slot opens a picker first); the status line, body and captures update in place |
 | `e` | choose the environment (`(none)` plus every `environments/*.json`) |
 | `t` | enable/disable individual `headers` and `query` entries for the selected request (session-only) |
 | `x`, `X` | clear the active scope / every scope, each behind a `y/n` confirmation |
 | `/` | filter the tree; `Esc` clears, `Enter` keeps the filter |
-| `Tab`, `Shift-Tab` | next / previous response tab |
+| `[`, `]` | previous / next response tab |
 | `1`, `2`, `3` | Body / Headers / Raw |
 | `v` | resolved / definition request view |
-| `J`, `K`, `PageUp`/`PageDown`, `Home`/`End` | scroll the response |
 | `?` | help overlay (any key closes it) |
 | `q`, `Esc`, `Ctrl-C` | quit |
 

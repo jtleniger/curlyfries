@@ -550,7 +550,10 @@ fn long_response_values_wrap_and_scroll_to_the_bottom() {
     assert!(!top.contains("end-eee"), "{top}");
 
     // `End` reaches the true bottom: wrapping no longer understates the height
-    // and pins the viewport at the first logical line.
+    // and pins the viewport at the first logical line. The scroll keys act on
+    // the focused pane, so focus the response first (tree → request → response).
+    app.on_key(key(KeyCode::Tab));
+    app.on_key(key(KeyCode::Tab));
     app.on_key(key(KeyCode::End));
     let bottom = rendered(&mut app, 72, 50);
     assert!(bottom.contains("end-eee"), "{bottom}");
@@ -626,4 +629,55 @@ fn toggle_modal_disables_headers_and_query_parameters() {
     assert_eq!(received[0].target, "/ships?limit=2");
     assert_eq!(received[1].header("X-Fingerprint"), None);
     assert_eq!(received[1].target, "/ships");
+}
+
+#[test]
+fn request_pane_columns_the_body_and_scrolls_when_focused() {
+    let server = StubServer::start(|_| Vec::new());
+    let fields: Vec<String> = (0..30).map(|i| format!("\"field{i:02}\": {i}")).collect();
+    let body = format!("{{ {} }}", fields.join(", "));
+    let dir = project_fixture(
+        "tui-request-pane",
+        &server,
+        &[(
+            "requests/ships/create.json",
+            &format!(
+                r#"{{ "method": "POST", "path": "/ships", "headers": {{ "X-Trace": "abc" }}, "body": {body} }}"#
+            ),
+        )],
+    );
+    let mut app = open(&dir);
+    app.select_id("ships/create");
+
+    // Wide enough to split: the `headers` and `body` sections share a row.
+    let screen = rendered(&mut app, 120, 40);
+    assert!(
+        screen
+            .lines()
+            .any(|row| row.contains("headers") && row.contains("body")),
+        "{screen}"
+    );
+    // The tall body is clipped at the top of the pane...
+    assert!(!screen.contains("field29"), "{screen}");
+
+    // ...and the tree-focused keys do not scroll it.
+    app.on_key(key(KeyCode::End));
+    assert!(!rendered(&mut app, 120, 40).contains("field29"));
+
+    // Focus the request pane (tree → request): `End` now scrolls it.
+    app.on_key(key(KeyCode::Tab));
+    app.on_key(key(KeyCode::End));
+    let bottom = rendered(&mut app, 120, 40);
+    assert!(bottom.contains("field29"), "{bottom}");
+    assert!(!bottom.contains("field00"), "{bottom}");
+
+    // Too narrow for columns: the sections stack into one scrollable column.
+    let narrow = rendered(&mut app, 60, 40);
+    assert!(
+        !narrow
+            .lines()
+            .any(|row| row.contains("headers") && row.contains("body")),
+        "{narrow}"
+    );
+    let _ = server.finish();
 }

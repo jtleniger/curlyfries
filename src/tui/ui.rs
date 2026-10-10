@@ -5,34 +5,39 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, List, ListState, Paragraph, Tabs, Widget, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, List, ListState, Paragraph, Tabs, Widget, Wrap,
+};
 
 use crate::render::{self, StatusClass};
-use crate::tui::app::{App, PendingClear, RequestView};
+use crate::tui::app::{App, Focus, PendingClear, RequestView};
 use crate::tui::theme::Theme;
 use crate::tui::tree::TreeRow;
 
 /// Spinner phases shown while a request is in flight.
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+/// Request-pane inner width below which the sections stack instead of splitting
+/// into two columns too narrow to read.
+const COLUMNS_MIN_WIDTH: u16 = 50;
+
 /// Footer key legend.
-const FOOTER: &str = "↑↓ select · Enter run · e env · t toggle · x clear · Tab body/headers/raw · v definition/resolved · / filter · ? help · q quit";
+const FOOTER: &str = "Tab focus · j/k move·scroll · Enter run · e env · t toggle · x clear · v view · [/] tab · / filter · ? help · q quit";
 
 /// Help overlay contents.
-const HELP: [&str; 16] = [
-    "↑ / k, ↓ / j      move the selection",
-    "g / G             first / last request",
+const HELP: [&str; 15] = [
+    "Tab / Shift-Tab   focus the tree, request or response pane",
+    "↑ / k, ↓ / j      move the selection, or scroll the focused pane",
+    "g / G, Home / End first / last request, or top / bottom of a pane",
+    "PageUp/PageDown   scroll the focused pane by ten lines (Ctrl-u/d)",
     "Enter / r         run the selected request (picks array slots)",
     "e                 choose the environment",
     "x / X             clear captures (scope / every scope, y/n)",
     "/                 filter requests (Esc clears)",
-    "Tab / Shift-Tab   next / previous response tab",
+    "[ / ]             previous / next response tab",
     "1 / 2 / 3         Body / Headers / Raw",
     "v                 resolved / definition request",
     "t                 enable/disable headers and query params",
-    "J / K             scroll the response by one line",
-    "PageUp/PageDown   scroll the response by ten lines",
-    "Home / End        jump to the top / bottom",
     "?                 close this help",
     "q / Esc / Ctrl-C  quit",
     "NO_COLOR=1        run without colours",
@@ -127,7 +132,11 @@ fn draw_tree(app: &App, frame: &mut Frame, area: Rect, theme: &Theme) {
     };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.accent))
+        .border_style(Style::default().fg(if app.focus == Focus::Tree {
+            theme.accent
+        } else {
+            theme.dim
+        }))
         .title(title);
 
     if app.rows.is_empty() {
@@ -191,19 +200,97 @@ fn draw_tree(app: &App, frame: &mut Frame, area: Rect, theme: &Theme) {
 }
 
 /// Request pane: resolved or raw, toggled with `v`.
-fn draw_request(app: &App, frame: &mut Frame, area: Rect, theme: &Theme) {
+///
+/// The resolved view keeps the `url` on its own full-width rows and lays
+/// `headers`/`query` beside the `body` below it, so a tall body uses the pane's
+/// height instead of pushing the metadata off the bottom. Under
+/// [`COLUMNS_MIN_WIDTH`] the sections stack into a single column instead. The
+/// definition view is one full-width JSON block. Every layout scrolls.
+fn draw_request(app: &mut App, frame: &mut Frame, area: Rect, theme: &Theme) {
     let label = match app.request_view {
         RequestView::Resolved => "resolved",
         RequestView::Definition => "definition",
     };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.dim))
+        .border_style(Style::default().fg(if app.focus == Focus::Request {
+            theme.accent
+        } else {
+            theme.dim
+        }))
         .title(format!("Request — {label} "));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let url = app.request_url().to_vec();
+    let meta = app.request_meta().to_vec();
+    let body = app.request_body().to_vec();
+
+    // The definition view, and a resolved request that failed to render, have
+    // metadata on one side only: stack whatever there is.
+    if url.is_empty() && meta.is_empty() {
+        draw_request_column(app, frame, inner, body);
+        return;
+    }
+    if body.is_empty() {
+        let mut lines = url;
+        lines.extend(meta);
+        draw_request_column(app, frame, inner, lines);
+        return;
+    }
+    if inner.width < COLUMNS_MIN_WIDTH {
+        let mut lines = url;
+        lines.extend(meta);
+        lines.extend(body);
+        draw_request_column(app, frame, inner, lines);
+        return;
+    }
+
+    // `url` spans the pane — it is the longest piece and one that must not wrap
+    // mid-token — with `headers`/`query` and `body` side by side below it.
+    let url_height = wrapped_rows(&url, inner.width).min(inner.height.saturating_sub(1));
+    let [url_area, columns] =
+        Layout::vertical([Constraint::Length(url_height), Constraint::Min(0)]).areas(inner);
+    frame.render_widget(Paragraph::new(url).wrap(Wrap { trim: false }), url_area);
+
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(columns);
+    // The divider claims the left column's last cell.
+    let left_width = left.width.saturating_sub(1);
+    let maximum = wrapped_rows(&meta, left_width)
+        .max(wrapped_rows(&body, right.width))
+        .saturating_sub(columns.height);
+    let scroll = app.request_scroll.min(maximum);
+    app.request_scroll = scroll;
     frame.render_widget(
-        Paragraph::new(app.request_lines().to_vec())
+        Paragraph::new(meta)
             .wrap(Wrap { trim: false })
-            .block(block),
+            .scroll((scroll, 0))
+            .block(
+                Block::default()
+                    .borders(Borders::RIGHT)
+                    .border_style(Style::default().fg(theme.dim)),
+            ),
+        left,
+    );
+    frame.render_widget(
+        Paragraph::new(body)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        right,
+    );
+}
+
+/// One wrapped, scrollable column filling `area`, clamped to the shared request
+/// scroll.
+fn draw_request_column(app: &mut App, frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
+    let maximum = wrapped_rows(&lines, area.width).saturating_sub(area.height);
+    let scroll = app.request_scroll.min(maximum);
+    app.request_scroll = scroll;
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
         area,
     );
 }
@@ -212,7 +299,11 @@ fn draw_request(app: &App, frame: &mut Frame, area: Rect, theme: &Theme) {
 fn draw_response(app: &mut App, frame: &mut Frame, area: Rect, theme: &Theme) {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.dim))
+        .border_style(Style::default().fg(if app.focus == Focus::Response {
+            theme.accent
+        } else {
+            theme.dim
+        }))
         .title(format!("Response — {}", app.response_url()));
     let inner = block.inner(area);
     frame.render_widget(block, area);

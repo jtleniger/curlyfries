@@ -44,6 +44,17 @@ pub enum RequestView {
     Definition,
 }
 
+/// Which pane the navigation keys act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    /// The request tree: the keys move the selection.
+    Tree,
+    /// The request pane: the keys scroll it.
+    Request,
+    /// The response pane: the keys scroll it.
+    Response,
+}
+
 /// Which tab the response pane shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseTab {
@@ -143,8 +154,16 @@ pub struct App {
     timeout: Option<Duration>,
     session: Session,
     pub(crate) request_view: RequestView,
-    resolved_view: Vec<Line<'static>>,
+    /// Pane the navigation keys act on.
+    pub(crate) focus: Focus,
+    /// The `url` section of the resolved request, shown full width.
+    resolved_url: Vec<Line<'static>>,
+    /// The `headers` and `query` sections of the resolved request.
+    resolved_meta: Vec<Line<'static>>,
+    /// The `body` section of the resolved request.
+    resolved_body: Vec<Line<'static>>,
     definition_view: Vec<Line<'static>>,
+    pub(crate) request_scroll: u16,
     pub(crate) response_tab: ResponseTab,
     response_lines: Vec<Line<'static>>,
     pub(crate) response_scroll: u16,
@@ -215,8 +234,12 @@ impl App {
             timeout,
             session,
             request_view: RequestView::Resolved,
-            resolved_view: Vec::new(),
+            focus: Focus::Tree,
+            resolved_url: Vec::new(),
+            resolved_meta: Vec::new(),
+            resolved_body: Vec::new(),
             definition_view: Vec::new(),
+            request_scroll: 0,
             response_tab: ResponseTab::Body,
             response_lines: Vec::new(),
             response_scroll: 0,
@@ -375,10 +398,29 @@ impl App {
 
     // --- views ------------------------------------------------------------
 
-    /// Lines shown by the request pane.
-    pub(crate) fn request_lines(&self) -> &[Line<'static>] {
+    /// The `url` section of the resolved request: shown full width above the
+    /// two columns. Empty in the definition view.
+    pub(crate) fn request_url(&self) -> &[Line<'static>] {
         match self.request_view {
-            RequestView::Resolved => &self.resolved_view,
+            RequestView::Resolved => &self.resolved_url,
+            RequestView::Definition => &[],
+        }
+    }
+
+    /// Lines shown on the left of the request pane: `headers` and `query`.
+    /// Empty in the definition view, where the file fills the pane.
+    pub(crate) fn request_meta(&self) -> &[Line<'static>] {
+        match self.request_view {
+            RequestView::Resolved => &self.resolved_meta,
+            RequestView::Definition => &[],
+        }
+    }
+
+    /// Lines shown on the right of the request pane: the `body` section, or the
+    /// whole request file in the definition view.
+    pub(crate) fn request_body(&self) -> &[Line<'static>] {
+        match self.request_view {
+            RequestView::Resolved => &self.resolved_body,
             RequestView::Definition => &self.definition_view,
         }
     }
@@ -669,16 +711,22 @@ impl App {
                 self.filter_active = true;
                 self.rebuild_rows();
             }
-            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
-            KeyCode::Char('g') => self.select_edge(false),
-            KeyCode::Char('G') => self.select_edge(true),
+            KeyCode::Up | KeyCode::Char('k') => self.navigate(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.navigate(1),
+            KeyCode::Char('g') | KeyCode::Home => self.navigate_edge(false),
+            KeyCode::Char('G') | KeyCode::End => self.navigate_edge(true),
+            KeyCode::PageUp => self.navigate(-10),
+            KeyCode::PageDown => self.navigate(10),
+            KeyCode::Char('u') if control => self.navigate(-10),
+            KeyCode::Char('d') if control => self.navigate(10),
             KeyCode::Enter | KeyCode::Char('r') => self.run_selected(),
             KeyCode::Char('e') => self.open_env_picker(),
             KeyCode::Char('t') => self.open_toggle_modal(),
-            KeyCode::Tab if shift => self.cycle_response_tab(false),
-            KeyCode::BackTab => self.cycle_response_tab(false),
-            KeyCode::Tab => self.cycle_response_tab(true),
+            KeyCode::Tab if shift => self.cycle_focus(false),
+            KeyCode::BackTab => self.cycle_focus(false),
+            KeyCode::Tab => self.cycle_focus(true),
+            KeyCode::Char('[') => self.cycle_response_tab(false),
+            KeyCode::Char(']') => self.cycle_response_tab(true),
             KeyCode::Char('1') => self.set_response_tab(ResponseTab::Body),
             KeyCode::Char('2') => self.set_response_tab(ResponseTab::Headers),
             KeyCode::Char('3') => self.set_response_tab(ResponseTab::Raw),
@@ -687,16 +735,9 @@ impl App {
                     RequestView::Resolved => RequestView::Definition,
                     RequestView::Definition => RequestView::Resolved,
                 };
+                self.request_scroll = 0;
                 self.refresh_request_views();
             }
-            KeyCode::Char('d') if control => self.scroll_response(10),
-            KeyCode::Char('u') if control => self.scroll_response(-10),
-            KeyCode::PageDown => self.scroll_response(10),
-            KeyCode::PageUp => self.scroll_response(-10),
-            KeyCode::Char('J') => self.scroll_response(1),
-            KeyCode::Char('K') => self.scroll_response(-1),
-            KeyCode::Home => self.response_scroll = 0,
-            KeyCode::End => self.response_scroll = u16::MAX,
             _ => {}
         }
     }
@@ -789,15 +830,39 @@ impl App {
 
     fn select_entry(&mut self, index: usize) {
         self.selected_id = Some(self.entries[index].id.clone());
+        self.request_scroll = 0;
         self.refresh_request_views();
     }
 
-    fn scroll_response(&mut self, delta: i32) {
-        self.response_scroll = if delta < 0 {
-            self.response_scroll
-                .saturating_sub(delta.unsigned_abs() as u16)
-        } else {
-            self.response_scroll.saturating_add(delta as u16)
+    /// Moves the focused pane: the selection in the tree, a scroll offset
+    /// elsewhere.
+    fn navigate(&mut self, delta: i32) {
+        match self.focus {
+            Focus::Tree => self.move_selection(delta as isize),
+            Focus::Request => self.request_scroll = shifted(self.request_scroll, delta),
+            Focus::Response => self.response_scroll = shifted(self.response_scroll, delta),
+        }
+    }
+
+    /// Jumps the focused pane to its first row (`last` = false) or last. Both
+    /// scroll offsets use `u16::MAX` for "bottom", clamped when drawn.
+    fn navigate_edge(&mut self, last: bool) {
+        match self.focus {
+            Focus::Tree => self.select_edge(last),
+            Focus::Request => self.request_scroll = if last { u16::MAX } else { 0 },
+            Focus::Response => self.response_scroll = if last { u16::MAX } else { 0 },
+        }
+    }
+
+    /// Cycles the focus: Tree → Request → Response → Tree.
+    fn cycle_focus(&mut self, forward: bool) {
+        self.focus = match (self.focus, forward) {
+            (Focus::Tree, true) => Focus::Request,
+            (Focus::Request, true) => Focus::Response,
+            (Focus::Response, true) => Focus::Tree,
+            (Focus::Tree, false) => Focus::Response,
+            (Focus::Response, false) => Focus::Request,
+            (Focus::Request, false) => Focus::Tree,
         };
     }
 
@@ -877,12 +942,14 @@ impl App {
 
     fn refresh_request_views(&mut self) {
         let Some(index) = self.selected_entry() else {
-            self.resolved_view = Vec::new();
+            self.resolved_url = Vec::new();
+            self.resolved_meta = Vec::new();
+            self.resolved_body = Vec::new();
             self.definition_view = Vec::new();
             return;
         };
         let theme = self.theme;
-        let resolved = {
+        let (url, meta, body) = {
             let scopes = Scopes {
                 env_name: self.env_name.as_deref(),
                 env: &self.env,
@@ -897,13 +964,19 @@ impl App {
             let def = self.defs[index].without_disabled(&disabled);
             match execute::render_request_display(&def, &scopes) {
                 Ok(request) => resolved_lines(&self.defs[index], &disabled, &request, &theme),
-                Err(error) => vec![Line::styled(
-                    format!("{error}"),
-                    Style::default().fg(theme.method_delete),
-                )],
+                Err(error) => (
+                    Vec::new(),
+                    vec![Line::styled(
+                        format!("{error}"),
+                        Style::default().fg(theme.method_delete),
+                    )],
+                    Vec::new(),
+                ),
             }
         };
-        self.resolved_view = resolved;
+        self.resolved_url = url;
+        self.resolved_meta = meta;
+        self.resolved_body = body;
         self.definition_view = json::json_lines(&self.definition_files[index], &theme);
     }
 
@@ -1020,6 +1093,9 @@ fn plain_lines(text: &str) -> Vec<Line<'static>> {
 
 /// Renders a resolved request for the request pane, labelling each part.
 ///
+/// Returns the `url` section (drawn full width), then the `headers` and `query`
+/// sections (the left column) and the `body` (the right column).
+///
 /// `def` is the request as written and `disabled` the slots switched off, so
 /// the `headers` and `query` sections list every slot in file order with its
 /// toggle state (`[x]` enabled, `[ ]` off). Switched-off slots keep their raw
@@ -1029,11 +1105,11 @@ fn resolved_lines(
     disabled: &DisabledSlots,
     request: &ResolvedRequest,
     theme: &Theme,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Vec<Line<'static>>, Vec<Line<'static>>) {
     let section = |title: &str| Line::styled(title.to_string(), Style::default().fg(theme.title));
     let empty = || Line::styled("(none)", Style::default().fg(theme.dim));
 
-    let mut lines = vec![
+    let url = vec![
         section("url"),
         Line::from(vec![
             Span::styled(
@@ -1044,7 +1120,10 @@ fn resolved_lines(
             ),
             Span::raw(request.url.clone()),
         ]),
+        Line::raw(String::new()),
     ];
+
+    let mut meta = vec![section("headers")];
 
     // Sent values line up with the enabled slots in file order; headers added
     // at render time (a default `Content-Type`) follow them.
@@ -1059,12 +1138,10 @@ fn resolved_lines(
     }
     headers.extend(sent.map(|(name, value)| format!("[x] {name}: {value}")));
 
-    lines.push(Line::raw(String::new()));
-    lines.push(section("headers"));
     if headers.is_empty() {
-        lines.push(empty());
+        meta.push(empty());
     } else {
-        lines.extend(headers.into_iter().map(Line::from));
+        meta.extend(headers.into_iter().map(Line::from));
     }
 
     let mut sent = request.query.iter();
@@ -1078,28 +1155,36 @@ fn resolved_lines(
     }
     query.extend(sent.map(|(name, value)| format!("[x] {name}={value}")));
 
-    lines.push(Line::raw(String::new()));
-    lines.push(section("query"));
+    meta.push(Line::raw(String::new()));
+    meta.push(section("query"));
     if query.is_empty() {
-        lines.push(empty());
+        meta.push(empty());
     } else {
-        lines.extend(query.into_iter().map(Line::from));
+        meta.extend(query.into_iter().map(Line::from));
     }
 
-    lines.push(Line::raw(String::new()));
-    lines.push(section("body"));
+    let mut body = vec![section("body")];
     match &request.body {
-        Some(body) => lines.extend(json::json_lines(body, theme)),
-        None => lines.push(empty()),
+        Some(text) => body.extend(json::json_lines(text, theme)),
+        None => body.push(empty()),
     }
 
-    lines
+    (url, meta, body)
 }
 
 /// Euclidean modulo of `value` into `0..modulo`.
 fn wrap(value: isize, modulo: usize) -> usize {
     let modulo = modulo as isize;
     (((value % modulo) + modulo) % modulo) as usize
+}
+
+/// Shifts a scroll offset by `delta`, saturating at both ends.
+fn shifted(value: u16, delta: i32) -> u16 {
+    if delta < 0 {
+        value.saturating_sub(delta.unsigned_abs() as u16)
+    } else {
+        value.saturating_add(delta as u16)
+    }
 }
 
 #[cfg(test)]
@@ -1173,17 +1258,57 @@ mod tests {
     }
 
     #[test]
-    fn tab_keys_cycle_the_response_tab() {
+    fn tab_cycles_focus_and_brackets_cycle_the_response_tab() {
         let (_dir, mut app) = app();
-        assert_eq!(app.response_tab, ResponseTab::Body);
+        assert_eq!(app.focus, Focus::Tree);
         app.on_key(key(KeyCode::Tab));
-        assert_eq!(app.response_tab, ResponseTab::Headers);
-        app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-        assert_eq!(app.response_tab, ResponseTab::Body);
+        assert_eq!(app.focus, Focus::Request);
         app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
-        assert_eq!(app.response_tab, ResponseTab::Raw);
+        assert_eq!(app.focus, Focus::Tree);
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Response);
+        app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(app.focus, Focus::Request);
+
+        // Tab no longer touches the response tabs; `[`/`]` cycle them.
+        assert_eq!(app.response_tab, ResponseTab::Body);
+        app.on_key(key(KeyCode::Char(']')));
+        assert_eq!(app.response_tab, ResponseTab::Headers);
+        app.on_key(key(KeyCode::Char('[')));
+        assert_eq!(app.response_tab, ResponseTab::Body);
         app.on_key(key(KeyCode::Char('1')));
         assert_eq!(app.response_tab, ResponseTab::Body);
+    }
+
+    #[test]
+    fn navigation_keys_follow_the_focused_pane() {
+        let (_dir, mut app) = app();
+
+        // Tree focus: the keys move the selection.
+        let first = app.selected_id.clone();
+        app.on_key(key(KeyCode::Char('j')));
+        assert_ne!(app.selected_id, first);
+        assert_eq!(app.request_scroll, 0);
+
+        // Request focus: the same keys scroll the request, not the tree.
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Request);
+        let selected = app.selected_id.clone();
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.selected_id, selected, "the tree must not move");
+        assert_eq!(app.request_scroll, 1);
+        app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(app.request_scroll, 11);
+        app.on_key(key(KeyCode::Char('g')));
+        assert_eq!(app.request_scroll, 0);
+
+        // Response focus: the same keys scroll the response instead.
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Response);
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.response_scroll, 1);
+        assert_eq!(app.request_scroll, 0);
     }
 
     #[test]
@@ -1263,6 +1388,21 @@ mod tests {
         );
     }
 
+    /// Flattens the columns of [`resolved_lines`] into one list.
+    fn resolved_text(
+        def: &RequestDef,
+        disabled: &DisabledSlots,
+        request: &ResolvedRequest,
+        theme: &Theme,
+    ) -> Vec<String> {
+        let (url, meta, body) = resolved_lines(def, disabled, request, theme);
+        url.into_iter()
+            .chain(meta)
+            .chain(body)
+            .map(|line| line.to_string())
+            .collect()
+    }
+
     #[test]
     fn resolved_lines_label_each_part() {
         let theme = Theme::plain();
@@ -1290,10 +1430,7 @@ mod tests {
             query: vec![("limit".to_string(), "2".to_string())],
             body: Some(r#"{"name":"x"}"#.to_string()),
         };
-        let text: Vec<String> = resolved_lines(&def, &DisabledSlots::default(), &request, &theme)
-            .iter()
-            .map(|line| line.to_string())
-            .collect();
+        let text = resolved_text(&def, &DisabledSlots::default(), &request, &theme);
         assert_eq!(text[0], "url");
         assert!(
             text[1].contains("POST http://127.0.0.1:4000/ships?limit=2"),
@@ -1311,6 +1448,23 @@ mod tests {
         assert!(text.contains(&"[x] limit=2".to_string()), "{text:?}");
         assert!(text.contains(&"body".to_string()), "{text:?}");
 
+        // The pane keeps `url` full width, then `headers`/`query` beside `body`.
+        let (url, meta, body) = resolved_lines(&def, &DisabledSlots::default(), &request, &theme);
+        let url_text: Vec<String> = url.iter().map(|line| line.to_string()).collect();
+        let meta_text: Vec<String> = meta.iter().map(|line| line.to_string()).collect();
+        let body_text: Vec<String> = body.iter().map(|line| line.to_string()).collect();
+        assert_eq!(url_text[0], "url");
+        assert!(url_text[1].contains("POST http://127.0.0.1:4000/ships?limit=2"));
+        assert!(!meta_text.contains(&"url".to_string()), "{meta_text:?}");
+        assert_eq!(meta_text[0], "headers", "{meta_text:?}");
+        assert!(meta_text.contains(&"query".to_string()), "{meta_text:?}");
+        assert!(!meta_text.contains(&"body".to_string()), "{meta_text:?}");
+        assert_eq!(body_text[0], "body", "{body_text:?}");
+        assert!(
+            body_text.iter().any(|line| line.contains("\"name\"")),
+            "{body_text:?}"
+        );
+
         // A switched-off header keeps its raw text and shows `[ ]`; the render
         // that produced `request` for the enabled case would have dropped it.
         let mut disabled = DisabledSlots::default();
@@ -1319,10 +1473,7 @@ mod tests {
             headers: vec![("Content-Type".to_string(), "application/json".to_string())],
             ..request.clone()
         };
-        let text: Vec<String> = resolved_lines(&def, &disabled, &stripped, &theme)
-            .iter()
-            .map(|line| line.to_string())
-            .collect();
+        let text = resolved_text(&def, &disabled, &stripped, &theme);
         assert!(text.contains(&"[ ] X-Trace: abc".to_string()), "{text:?}");
         assert!(
             text.contains(&"[x] Content-Type: application/json".to_string()),
@@ -1346,10 +1497,7 @@ mod tests {
             body: None,
             ..request
         };
-        let text: Vec<String> = resolved_lines(&bare, &DisabledSlots::default(), &bodyless, &theme)
-            .iter()
-            .map(|line| line.to_string())
-            .collect();
+        let text = resolved_text(&bare, &DisabledSlots::default(), &bodyless, &theme);
         assert_eq!(
             text.iter().filter(|line| *line == "(none)").count(),
             3,
