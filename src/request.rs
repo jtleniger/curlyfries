@@ -300,48 +300,50 @@ pub fn template_error(file: &Path, pointer: &str, problem: TemplateProblem, valu
     }
 }
 
-/// Pick names (`${name[]}` bases) used anywhere in `def`, first-seen order,
-/// deduplicated.
-pub fn pick_names(def: &RequestDef) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
-    collect_picks(&def.name, &mut names);
-    collect_picks(&def.path, &mut names);
+pub use crate::template::Input;
+
+/// Inputs (`${name[]}` picks and `${name?}` / `${name?json}` prompts) used
+/// anywhere in `def`, first-seen order, deduplicated.
+pub fn input_names(def: &RequestDef) -> Vec<Input> {
+    let mut names: Vec<Input> = Vec::new();
+    collect_inputs(&def.name, &mut names);
+    collect_inputs(&def.path, &mut names);
     for (key, value) in &def.headers {
-        collect_picks(key, &mut names);
-        collect_picks(value, &mut names);
+        collect_inputs(key, &mut names);
+        collect_inputs(value, &mut names);
     }
     for (key, value) in &def.query {
-        collect_picks(key, &mut names);
-        collect_picks(value, &mut names);
+        collect_inputs(key, &mut names);
+        collect_inputs(value, &mut names);
     }
     if let Some(body) = &def.body {
-        collect_tree_picks(body, &mut names);
+        collect_tree_inputs(body, &mut names);
     }
     names
 }
 
-/// Appends the picks in `text` to `names`, skipping ones already present.
-fn collect_picks(text: &str, names: &mut Vec<String>) {
-    for name in template::pick_names(text) {
-        if !names.contains(&name) {
-            names.push(name);
+/// Appends the inputs in `text` to `names`, skipping duplicates.
+fn collect_inputs(text: &str, names: &mut Vec<Input>) {
+    for input in template::input_names(text) {
+        if !names.contains(&input) {
+            names.push(input);
         }
     }
 }
 
-/// Appends the picks in every string of `value`, object keys included.
-fn collect_tree_picks(value: &Value, names: &mut Vec<String>) {
+/// Appends the inputs in every string of `value`, object keys included.
+fn collect_tree_inputs(value: &Value, names: &mut Vec<Input>) {
     match value {
-        Value::String(text) => collect_picks(text, names),
+        Value::String(text) => collect_inputs(text, names),
         Value::Object(map) => {
             for (key, child) in map {
-                collect_picks(key, names);
-                collect_tree_picks(child, names);
+                collect_inputs(key, names);
+                collect_tree_inputs(child, names);
             }
         }
         Value::Array(items) => {
             for item in items {
-                collect_tree_picks(item, names);
+                collect_tree_inputs(item, names);
             }
         }
         _ => {}
@@ -617,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn picks_are_collected_across_every_slot_in_order() {
+    fn inputs_are_collected_across_every_slot_in_order() {
         let def = load(
             "ships/by-class",
             r#"{
@@ -625,18 +627,31 @@ mod tests {
               "method": "POST",
               "path": "/ships?class=${classes[]}&other=${other[]}",
               "headers": { "X-A": "${classes[]}", "${header[]}": "v" },
-              "body": { "deep": { "list": ["${body[]}", "${classes[]}"] } }
+              "body": { "deep": { "list": ["${body[]}", "${classes[]}", "${limit?}", "${n?json}"] } }
             }"#,
         )
         .unwrap();
         assert_eq!(
-            pick_names(&def),
-            vec!["classes", "other", "header", "body"],
+            input_names(&def),
+            vec![
+                Input::Pick("classes".to_string()),
+                Input::Pick("other".to_string()),
+                Input::Pick("header".to_string()),
+                Input::Pick("body".to_string()),
+                Input::Prompt {
+                    name: "limit".to_string(),
+                    json: false,
+                },
+                Input::Prompt {
+                    name: "n".to_string(),
+                    json: true,
+                },
+            ],
             "first-seen order, deduplicated"
         );
 
         let plain = load("x", r#"{ "method": "GET", "path": "/x" }"#).unwrap();
-        assert!(pick_names(&plain).is_empty());
+        assert!(input_names(&plain).is_empty());
     }
 
     #[test]

@@ -239,6 +239,149 @@ fn pick_slots_open_a_picker_and_send_the_chosen_element() {
 }
 
 #[test]
+fn prompt_slots_ask_for_text_and_send_it() {
+    let server = StubServer::start(|_| vec![StubResponse::json(200, "OK", "{}")]);
+    let dir = project_fixture(
+        "tui-prompt",
+        &server,
+        &[(
+            "requests/ships/list.json",
+            r#"{
+              "method": "GET",
+              "path": "/ships",
+              "query": { "limit": "${limit?}" }
+            }"#,
+        )],
+    );
+    let mut app = open(&dir);
+    app.select_id("ships/list");
+
+    // The resolved request keeps the placeholder until a value is entered.
+    let before = rendered(&mut app, 120, 40);
+    assert!(before.contains("limit=${limit?}"), "{before}");
+
+    // `Enter` opens the text modal and nothing is sent yet.
+    app.on_key(key(KeyCode::Enter));
+    let prompting = rendered(&mut app, 120, 40);
+    assert!(prompting.contains("Input limit"), "{prompting}");
+    assert_eq!(
+        server.request_count(),
+        0,
+        "nothing is sent before the prompt"
+    );
+
+    // `Esc` closes the modal without sending anything.
+    app.on_key(key(KeyCode::Esc));
+    assert!(
+        !rendered(&mut app, 120, 40).contains("Input limit"),
+        "Esc closes the prompt"
+    );
+    assert_eq!(server.request_count(), 0, "Esc sends nothing");
+
+    // Type `5` and submit: the sent URL carries the typed text.
+    app.on_key(key(KeyCode::Enter));
+    app.on_key(key(KeyCode::Char('5')));
+    app.on_key(key(KeyCode::Enter));
+    app.wait_for_run(Duration::from_secs(5));
+
+    let received = server.finish();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].method, "GET");
+    assert_eq!(received[0].target, "/ships?limit=5");
+}
+
+#[test]
+fn text_prompts_do_not_coerce_and_json_prompts_do() {
+    let server = StubServer::start(|_| vec![StubResponse::json(200, "OK", "{}")]);
+    let dir = project_fixture(
+        "tui-prompt-types",
+        &server,
+        &[
+            (
+                "requests/ships/text.json",
+                r#"{ "method": "POST", "path": "/ships", "body": { "id": "${id?}" } }"#,
+            ),
+            (
+                "requests/ships/json.json",
+                r#"{ "method": "POST", "path": "/ships", "body": { "crewCapacity": "${n?json}" } }"#,
+            ),
+        ],
+    );
+    let mut app = open(&dir);
+
+    // `${id?}` typed `3` sends the string `"3"`, never the number.
+    app.select_id("ships/text");
+    app.on_key(key(KeyCode::Enter));
+    assert!(rendered(&mut app, 120, 40).contains("Input id"));
+    app.on_key(key(KeyCode::Char('3')));
+    app.on_key(key(KeyCode::Enter));
+    app.wait_for_run(Duration::from_secs(5));
+    let received = server.finish();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].body_json()["id"], json!("3"));
+
+    // `${n?json}` typed `3` sends the number.
+    let server = StubServer::start(|_| vec![StubResponse::json(200, "OK", "{}")]);
+    let dir = project_fixture(
+        "tui-prompt-json",
+        &server,
+        &[(
+            "requests/ships/json.json",
+            r#"{ "method": "POST", "path": "/ships", "body": { "crewCapacity": "${n?json}" } }"#,
+        )],
+    );
+    let mut app = open(&dir);
+    app.select_id("ships/json");
+    app.on_key(key(KeyCode::Enter));
+    assert!(rendered(&mut app, 120, 40).contains("Input n (JSON)"));
+    app.on_key(key(KeyCode::Char('3')));
+    app.on_key(key(KeyCode::Enter));
+    app.wait_for_run(Duration::from_secs(5));
+    let received = server.finish();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].body_json()["crewCapacity"], json!(3));
+
+    // Invalid JSON is refused: the modal stays open and nothing is sent, until
+    // a quoted string is entered.
+    let server = StubServer::start(|_| vec![StubResponse::json(200, "OK", "{}")]);
+    let dir = project_fixture(
+        "tui-prompt-json-invalid",
+        &server,
+        &[(
+            "requests/ships/json.json",
+            r#"{ "method": "POST", "path": "/ships", "body": { "crewCapacity": "${n?json}" } }"#,
+        )],
+    );
+    let mut app = open(&dir);
+    app.select_id("ships/json");
+    app.on_key(key(KeyCode::Enter));
+    for character in "frigate".chars() {
+        app.on_key(key(KeyCode::Char(character)));
+    }
+    app.on_key(key(KeyCode::Enter));
+    let refused = rendered(&mut app, 120, 40);
+    assert!(
+        refused.contains("Input n (JSON)"),
+        "modal stays open: {refused}"
+    );
+    assert!(refused.contains("not valid JSON"), "{refused}");
+    assert_eq!(server.request_count(), 0, "invalid JSON sends nothing");
+
+    // Submitting a quoted string succeeds and sends the JSON string.
+    for _ in 0.."frigate".len() {
+        app.on_key(key(KeyCode::Backspace));
+    }
+    app.on_key(key(KeyCode::Char('"')));
+    app.on_key(key(KeyCode::Char('f')));
+    app.on_key(key(KeyCode::Char('"')));
+    app.on_key(key(KeyCode::Enter));
+    app.wait_for_run(Duration::from_secs(5));
+    let received = server.finish();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].body_json()["crewCapacity"], json!("f"));
+}
+
+#[test]
 fn failed_output_keeps_the_response_and_shows_a_section() {
     let server = StubServer::start(|_| {
         vec![StubResponse::json(

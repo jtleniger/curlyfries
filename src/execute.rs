@@ -290,6 +290,12 @@ fn render_failure(
             value: raw.to_string(),
             name,
         },
+        RenderError::MissingPrompt(token) => Error::UnresolvedPrompt {
+            path: def.file.clone(),
+            pointer: pointer.to_string(),
+            value: raw.to_string(),
+            token,
+        },
         RenderError::NullInStringSlot(name) => Error::Schema {
             path: def.file.clone(),
             pointer: pointer.to_string(),
@@ -798,6 +804,47 @@ mod tests {
                 assert_eq!(pointer, "/path");
                 assert_eq!(value, "/ships?class=${shipClasses[]}&limit=${limit}");
                 assert_eq!(name, "shipClasses");
+            }
+            other => panic!("wrong error: {other}"),
+        }
+        assert_eq!(err.exit_code(), 3);
+    }
+
+    #[test]
+    fn render_request_substitutes_entered_prompt_values() {
+        let def = request::validate(
+            "ships/create",
+            Path::new("requests/ships/create.json"),
+            &json!({
+                "method": "POST",
+                "path": "/ships",
+                "query": { "limit": "${limit?}" },
+                "body": { "crew": "${n?json}" }
+            }),
+        )
+        .unwrap();
+        let env = vars(&[("baseUrl", json!("http://host:4000"))]);
+        let empty = Variables::default();
+        let picks = vars(&[("limit?", json!("5")), ("n?json", json!(3))]);
+
+        let scopes = scopes_with_picks(&env, &empty, &picks);
+        let resolved = render_request(&def, &scopes).unwrap();
+        assert_eq!(resolved.url, "http://host:4000/ships?limit=5");
+        assert_eq!(resolved.body.as_deref(), Some(r#"{"crew":3}"#));
+
+        // Without entered values the render fails with the dedicated error.
+        let scopes = scopes_of(&env, &empty);
+        let err = render_request(&def, &scopes).unwrap_err();
+        match &err {
+            Error::UnresolvedPrompt {
+                pointer,
+                value,
+                token,
+                ..
+            } => {
+                assert_eq!(pointer, "/query/limit");
+                assert_eq!(value, "${limit?}");
+                assert_eq!(token, "limit?");
             }
             other => panic!("wrong error: {other}"),
         }

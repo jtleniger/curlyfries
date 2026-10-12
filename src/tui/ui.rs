@@ -30,7 +30,7 @@ const HELP: [&str; 15] = [
     "↑ / k, ↓ / j      move the selection, or scroll the focused pane",
     "g / G, Home / End first / last request, or top / bottom of a pane",
     "PageUp/PageDown   scroll the focused pane by ten lines (Ctrl-u/d)",
-    "Enter / r         run the selected request (picks array slots)",
+    "Enter / r         run the selected request (picks and prompts)",
     "e                 choose the environment",
     "x / X             clear captures (scope / every scope, y/n)",
     "/                 filter requests (Esc clears)",
@@ -74,6 +74,9 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
     }
     if app.pick_prompt().is_some() {
         draw_pick_modal(app, frame, area, &theme);
+    }
+    if app.prompt_prompt().is_some() {
+        draw_prompt_modal(app, frame, area, &theme);
     }
     if app.toggle_modal.is_some() {
         draw_toggle_modal(app, frame, area, &theme);
@@ -530,6 +533,30 @@ fn draw_pick_modal(app: &App, frame: &mut Frame, area: Rect, theme: &Theme) {
         popup,
         &mut state,
     );
+}
+
+/// Centred text prompt for one `${name?}` / `${name?json}` token.
+fn draw_prompt_modal(app: &App, frame: &mut Frame, area: Rect, theme: &Theme) {
+    let Some((title, buffer, error)) = app.prompt_prompt() else {
+        return;
+    };
+    let popup = centered(50, 30, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent))
+        .title(title);
+    let mut lines = vec![
+        Line::from(format!("{buffer}▏")),
+        Line::styled("Enter submit · Esc cancel", Style::default().fg(theme.dim)),
+    ];
+    if let Some(error) = error {
+        lines.push(Line::styled(
+            error,
+            Style::default().fg(theme.method_delete),
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
 /// Centred enable/disable modal for a request's headers and query parameters.

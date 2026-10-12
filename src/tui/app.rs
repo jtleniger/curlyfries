@@ -16,7 +16,7 @@ use crate::error::Error;
 use crate::execute::{self, ExecResult, ResolvedRequest};
 use crate::project::{self, Entry, Project};
 use crate::render::{self, StatusClass};
-use crate::request::{self, DisabledSlots, RequestDef};
+use crate::request::{self, DisabledSlots, Input, RequestDef};
 use crate::runner::{self, Runner};
 use crate::scopes::Scopes;
 use crate::session::{self, Session};
@@ -75,13 +75,13 @@ enum EnvChoice {
     Named(String),
 }
 
-/// A request waiting for `${name[]}` choices before it is sent.
+/// A request waiting for `${name[]}` picks and `${name?}` prompts before it is sent.
 struct PendingRun {
     /// Index into `entries` of the request to send.
     entry_index: usize,
-    /// Pick names still to choose, in first-seen order.
-    remaining: Vec<String>,
-    /// Chosen values, keyed `name[]`.
+    /// Inputs still to satisfy, in first-seen order.
+    remaining: Vec<Input>,
+    /// Chosen values, keyed `name[]`, `name?` or `name?json`.
     choices: Map,
 }
 
@@ -93,6 +93,18 @@ struct PickModal {
     options: Vec<Value>,
     /// Highlighted option.
     selected: usize,
+}
+
+/// The open text prompt for one `${name?}` / `${name?json}` token.
+struct PromptModal {
+    /// Label shown as the modal title.
+    name: String,
+    /// Whether the typed text is parsed as JSON before it is stored.
+    json: bool,
+    /// Text typed so far.
+    buffer: String,
+    /// Why the last `Enter` was refused, if it was.
+    error: Option<String>,
 }
 
 /// Which list a toggle row belongs to.
@@ -173,10 +185,12 @@ pub struct App {
     last: Option<LastRun>,
     env_choices: Vec<EnvChoice>,
     pub(crate) env_picker: Option<usize>,
-    /// A request waiting for `${name[]}` choices, if any.
+    /// A request waiting for picks and prompts, if any.
     pending: Option<PendingRun>,
     /// The open picker for one array variable, if any.
     pick_modal: Option<PickModal>,
+    /// The open text prompt for one `${name?}` / `${name?json}` token, if any.
+    prompt_modal: Option<PromptModal>,
     /// The open enable/disable modal for one request, if any.
     pub(crate) toggle_modal: Option<ToggleModal>,
     /// Header and query slots switched off, keyed by request id.
@@ -251,6 +265,7 @@ impl App {
             env_picker: None,
             pending: None,
             pick_modal: None,
+            prompt_modal: None,
             toggle_modal: None,
             disabled: HashMap::new(),
             confirm: None,
@@ -280,6 +295,10 @@ impl App {
         }
         if self.pick_modal.is_some() {
             self.pick_key(key);
+            return;
+        }
+        if self.prompt_modal.is_some() {
+            self.prompt_key(key);
             return;
         }
         if self.toggle_modal.is_some() {
@@ -493,6 +512,18 @@ impl App {
         })
     }
 
+    /// Title, typed text and error of the open prompt modal, if any.
+    pub(crate) fn prompt_prompt(&self) -> Option<(String, String, Option<String>)> {
+        self.prompt_modal.as_ref().map(|modal| {
+            let title = if modal.json {
+                format!("Input {} (JSON)", modal.name)
+            } else {
+                format!("Input {}", modal.name)
+            };
+            (title, modal.buffer.clone(), modal.error.clone())
+        })
+    }
+
     /// Request id, `(enabled, label)` rows and selection of the open toggle modal.
     pub(crate) fn toggle_prompt(&self) -> Option<(String, Vec<(bool, String)>, usize)> {
         self.toggle_modal.as_ref().map(|modal| {
@@ -552,10 +583,65 @@ impl App {
                 if let (Some(chosen), Some(pending)) = (chosen, self.pending.as_mut()) {
                     pending.choices.insert(format!("{name}[]"), chosen);
                 }
-                self.advance_pick();
+                self.advance_input();
             }
             KeyCode::Esc => {
                 self.pick_modal = None;
+                self.pending = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Handles a key while the prompt modal is up.
+    fn prompt_key(&mut self, key: KeyEvent) {
+        let Some(modal) = self.prompt_modal.as_ref() else {
+            return;
+        };
+        let (json, name, text) = (modal.json, modal.name.clone(), modal.buffer.clone());
+        match key.code {
+            KeyCode::Char(character)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                if let Some(modal) = self.prompt_modal.as_mut() {
+                    modal.buffer.push(character);
+                    modal.error = None;
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(modal) = self.prompt_modal.as_mut() {
+                    modal.buffer.pop();
+                    modal.error = None;
+                }
+            }
+            KeyCode::Enter => {
+                let value = if json {
+                    match serde_json::from_str::<Value>(&text) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            if let Some(modal) = self.prompt_modal.as_mut() {
+                                modal.error = Some(format!("not valid JSON: {error}"));
+                            }
+                            return;
+                        }
+                    }
+                } else {
+                    Value::String(text)
+                };
+                let key = if json {
+                    format!("{name}?json")
+                } else {
+                    format!("{name}?")
+                };
+                self.prompt_modal = None;
+                if let Some(pending) = self.pending.as_mut() {
+                    pending.choices.insert(key, value);
+                }
+                self.advance_input();
+            }
+            KeyCode::Esc => {
+                self.prompt_modal = None;
                 self.pending = None;
             }
             _ => {}
@@ -625,8 +711,8 @@ impl App {
         self.refresh_request_views();
     }
 
-    /// Opens the next picker, or sends the request once every pick is chosen.
-    fn advance_pick(&mut self) {
+    /// Opens the next picker or prompt, or sends the request once every input is set.
+    fn advance_input(&mut self) {
         let Some(pending) = self.pending.as_mut() else {
             return;
         };
@@ -635,22 +721,32 @@ impl App {
         } else {
             Some(pending.remaining.remove(0))
         };
-        let Some(name) = next else {
+        let Some(input) = next else {
             let pending = self.pending.take().expect("pending is set");
             self.spawn_run(pending.entry_index, pending.choices);
             return;
         };
-        match self.pick_options(&name) {
-            Ok(options) => {
-                self.pick_modal = Some(PickModal {
+        match input {
+            Input::Pick(name) => match self.pick_options(&name) {
+                Ok(options) => {
+                    self.pick_modal = Some(PickModal {
+                        name,
+                        options,
+                        selected: 0,
+                    });
+                }
+                Err(message) => {
+                    self.status_message = Some(message);
+                    self.pending = None;
+                }
+            },
+            Input::Prompt { name, json } => {
+                self.prompt_modal = Some(PromptModal {
                     name,
-                    options,
-                    selected: 0,
+                    json,
+                    buffer: String::new(),
+                    error: None,
                 });
-            }
-            Err(message) => {
-                self.status_message = Some(message);
-                self.pending = None;
             }
         }
     }
@@ -1024,17 +1120,17 @@ impl App {
         let Some(index) = self.selected_entry() else {
             return;
         };
-        let names = request::pick_names(&self.defs[index]);
-        if names.is_empty() {
+        let inputs = request::input_names(&self.defs[index]);
+        if inputs.is_empty() {
             self.spawn_run(index, Map::new());
             return;
         }
         self.pending = Some(PendingRun {
             entry_index: index,
-            remaining: names,
+            remaining: inputs,
             choices: Map::new(),
         });
-        self.advance_pick();
+        self.advance_input();
     }
 
     /// Starts the selected request on a worker thread with `choices` as picks.
