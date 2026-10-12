@@ -8,6 +8,13 @@
 //! element is substituted just before the request is sent. It resolves through
 //! the lookup alone — never the `random.` built-ins — under the key `name[]`.
 //!
+//! `${name?}` and `${name?json}` are *prompt* tokens: the user types a value for
+//! the label `name` before the request is sent. A text prompt's value is the
+//! entered text as a JSON string, looked up under `name?`; a JSON prompt's value
+//! is the entered text parsed as JSON, looked up under `name?json`. The parse
+//! happens when the user submits the modal, so the render path only ever reads a
+//! value that is already typed.
+//!
 //! Two renderings exist. [`Template::render_native`] keeps JSON typing for a
 //! *whole placeholder* (a string whose trimmed form is exactly one placeholder
 //! and nothing else) and falls back to [`Template::render_string`] otherwise.
@@ -37,6 +44,13 @@ pub enum Segment {
     Var(String),
     /// A `${name[]}` pick token; the string is the base name, e.g. `types`.
     Pick(String),
+    /// A `${name?}` (text) or `${name?json}` (JSON) prompt token.
+    Prompt {
+        /// Label the value is entered under, e.g. `limit`.
+        name: String,
+        /// Whether the entered text is parsed as JSON before it is stored.
+        json: bool,
+    },
 }
 
 /// A parsed template.
@@ -55,6 +69,9 @@ pub enum RenderError {
     /// A `${name[]}` pick slot had no chosen value.
     #[error("no value chosen for `{0}[]`")]
     MissingPick(String),
+    /// A prompt slot had no entered value; the string is the token as written.
+    #[error("no value entered for `{0}`")]
+    MissingPrompt(String),
     /// A `null` value was used where a string is required.
     #[error("variable `{0}` is null")]
     NullInStringSlot(String),
@@ -102,6 +119,22 @@ pub fn parse(input: &str) -> Result<Template, TemplateProblem> {
                         return Err(TemplateProblem::InvalidName);
                     }
                     Segment::Pick(base.to_string())
+                } else if let Some(base) = name.strip_suffix("?json") {
+                    if !is_valid_name(base) {
+                        return Err(TemplateProblem::InvalidName);
+                    }
+                    Segment::Prompt {
+                        name: base.to_string(),
+                        json: true,
+                    }
+                } else if let Some(base) = name.strip_suffix('?') {
+                    if !is_valid_name(base) {
+                        return Err(TemplateProblem::InvalidName);
+                    }
+                    Segment::Prompt {
+                        name: base.to_string(),
+                        json: false,
+                    }
                 } else if is_valid_name(&name) {
                     Segment::Var(name)
                 } else {
@@ -124,7 +157,11 @@ pub fn parse(input: &str) -> Result<Template, TemplateProblem> {
 
     let trimmed = input.trim();
     let whole = if trimmed.len() == input.len() {
-        segments.len() == 1 && matches!(segments.first(), Some(Segment::Var(_) | Segment::Pick(_)))
+        segments.len() == 1
+            && matches!(
+                segments.first(),
+                Some(Segment::Var(_) | Segment::Pick(_) | Segment::Prompt { .. })
+            )
     } else if trimmed.is_empty() {
         false
     } else {
@@ -134,7 +171,12 @@ pub fn parse(input: &str) -> Result<Template, TemplateProblem> {
     if whole {
         let single = segments
             .into_iter()
-            .find(|s| matches!(s, Segment::Var(_) | Segment::Pick(_)))
+            .find(|s| {
+                matches!(
+                    s,
+                    Segment::Var(_) | Segment::Pick(_) | Segment::Prompt { .. }
+                )
+            })
             .unwrap_or_else(|| unreachable!("whole templates hold exactly one placeholder"));
         segments = vec![single];
     }
@@ -165,10 +207,12 @@ impl Template {
 
     /// Whether the template contains no placeholder at all.
     pub fn is_literal(&self) -> bool {
-        !self
-            .segments
-            .iter()
-            .any(|s| matches!(s, Segment::Var(_) | Segment::Pick(_)))
+        !self.segments.iter().any(|s| {
+            matches!(
+                s,
+                Segment::Var(_) | Segment::Pick(_) | Segment::Prompt { .. }
+            )
+        })
     }
 
     /// Renders with JSON typing: a whole placeholder yields its value untouched,
@@ -178,6 +222,7 @@ impl Template {
             return match &self.segments[0] {
                 Segment::Var(name) => resolve(name, lookup),
                 Segment::Pick(name) => resolve_pick(name, lookup),
+                Segment::Prompt { name, json } => resolve_prompt(name, *json, lookup),
                 Segment::Literal(_) => {
                     unreachable!("whole templates hold exactly one placeholder")
                 }
@@ -200,16 +245,34 @@ impl Template {
                     let value = resolve_pick(name, lookup)?;
                     out.push_str(&string_form(name, &value)?);
                 }
+                Segment::Prompt { name, json } => {
+                    let value = resolve_prompt(name, *json, lookup)?;
+                    out.push_str(&string_form(name, &value)?);
+                }
             }
         }
         Ok(out)
     }
 }
 
-/// The `${name[]}` bases in `text`, in first-seen order.
+/// A token that needs a value chosen or entered before the request is sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Input {
+    /// A `${name[]}` pick: choose one element of the array variable `name`.
+    Pick(String),
+    /// A `${name?}` / `${name?json}` prompt: type a value under the label `name`.
+    Prompt {
+        /// Label the value is entered under.
+        name: String,
+        /// Whether the entered text is parsed as JSON.
+        json: bool,
+    },
+}
+
+/// The inputs in `text`, in first-seen order.
 ///
 /// A parse failure yields an empty list: the file was already validated at load.
-pub fn pick_names(text: &str) -> Vec<String> {
+pub fn input_names(text: &str) -> Vec<Input> {
     let Ok(parsed) = parse(text) else {
         return Vec::new();
     };
@@ -217,7 +280,11 @@ pub fn pick_names(text: &str) -> Vec<String> {
         .segments
         .iter()
         .filter_map(|segment| match segment {
-            Segment::Pick(name) => Some(name.clone()),
+            Segment::Pick(name) => Some(Input::Pick(name.clone())),
+            Segment::Prompt { name, json } => Some(Input::Prompt {
+                name: name.clone(),
+                json: *json,
+            }),
             Segment::Literal(_) | Segment::Var(_) => None,
         })
         .collect()
@@ -237,6 +304,17 @@ fn resolve(name: &str, lookup: Lookup<'_>) -> Result<Value, RenderError> {
 /// Resolves a pick token: the chosen element is looked up under `name[]`.
 fn resolve_pick(name: &str, lookup: Lookup<'_>) -> Result<Value, RenderError> {
     lookup(&format!("{name}[]")).ok_or_else(|| RenderError::MissingPick(name.to_string()))
+}
+
+/// Resolves a prompt token: the entered value is looked up under `name?`
+/// (text) or `name?json` (JSON).
+fn resolve_prompt(name: &str, json: bool, lookup: Lookup<'_>) -> Result<Value, RenderError> {
+    let key = if json {
+        format!("{name}?json")
+    } else {
+        format!("{name}?")
+    };
+    lookup(&key).ok_or(RenderError::MissingPrompt(key))
 }
 
 /// The string form of a value (see the module docs).
@@ -495,15 +573,110 @@ mod tests {
     }
 
     #[test]
-    fn pick_names_are_collected_in_order() {
-        assert_eq!(pick_names("/ships?class=${types[]}"), vec!["types"]);
-        assert_eq!(pick_names("plain"), Vec::<String>::new());
+    fn input_names_are_collected_in_order() {
         assert_eq!(
-            pick_names("${a[]}-${b[]}-${a[]}"),
-            vec!["a", "b", "a"],
+            input_names("/ships?class=${types[]}"),
+            vec![Input::Pick("types".to_string())]
+        );
+        assert_eq!(input_names("plain"), Vec::<Input>::new());
+        assert_eq!(
+            input_names("${a[]}-${b[]}-${a[]}"),
+            vec![
+                Input::Pick("a".to_string()),
+                Input::Pick("b".to_string()),
+                Input::Pick("a".to_string()),
+            ],
             "duplicates are kept; the caller deduplicates"
         );
-        assert_eq!(pick_names("${"), Vec::<String>::new());
+        assert_eq!(
+            input_names("${limit?}/${n?json}/${limit?}"),
+            vec![
+                Input::Prompt {
+                    name: "limit".to_string(),
+                    json: false,
+                },
+                Input::Prompt {
+                    name: "n".to_string(),
+                    json: true,
+                },
+                Input::Prompt {
+                    name: "limit".to_string(),
+                    json: false,
+                },
+            ]
+        );
+        assert_eq!(input_names("${"), Vec::<Input>::new());
+    }
+
+    #[test]
+    fn prompt_tokens_parse_as_prompts() {
+        assert_eq!(
+            parse("${limit?}").unwrap().segments(),
+            &[Segment::Prompt {
+                name: "limit".into(),
+                json: false,
+            }]
+        );
+        assert_eq!(
+            parse("${n?json}").unwrap().segments(),
+            &[Segment::Prompt {
+                name: "n".into(),
+                json: true,
+            }]
+        );
+        // Whitespace is trimmed like any other placeholder.
+        assert_eq!(
+            parse(" ${limit?} ").unwrap().segments(),
+            &[Segment::Prompt {
+                name: "limit".into(),
+                json: false,
+            }]
+        );
+        assert!(parse("${limit?}").unwrap().is_whole());
+        assert!(!parse("${limit?}").unwrap().is_literal());
+        assert!(!parse("limit=${limit?}").unwrap().is_whole());
+        // `json` before a trailing `?` does not make a JSON prompt.
+        assert_eq!(
+            parse("${json?}").unwrap().segments(),
+            &[Segment::Prompt {
+                name: "json".into(),
+                json: false,
+            }]
+        );
+        // `?json5`, a spaced `?`, an empty base and a trailing `?` alone are invalid.
+        assert_eq!(
+            parse("${x?json5}").unwrap_err(),
+            TemplateProblem::InvalidName
+        );
+        assert_eq!(parse("${x ?}").unwrap_err(), TemplateProblem::InvalidName);
+        assert_eq!(parse("${?}").unwrap_err(), TemplateProblem::InvalidName);
+        assert_eq!(parse("${a?b}").unwrap_err(), TemplateProblem::InvalidName);
+    }
+
+    #[test]
+    fn prompt_tokens_resolve_under_their_marked_key() {
+        // A text prompt keeps the typed value as-is.
+        let text = vars(&[("n?", json!("3"))]);
+        assert_eq!(render("${n?}", &text).unwrap(), json!("3"));
+        // A JSON prompt keeps the parsed value's type.
+        let json_value = vars(&[("n?json", json!(3))]);
+        assert_eq!(render("${n?json}", &json_value).unwrap(), json!(3));
+        assert_eq!(
+            parse("limit=${n?json}")
+                .unwrap()
+                .render_string(&json_value)
+                .unwrap(),
+            "limit=3"
+        );
+        // Both forms are distinct keys: the text form ignores the JSON entry.
+        assert_eq!(
+            render("${n?}", &json_value).unwrap_err(),
+            RenderError::MissingPrompt("n?".to_string())
+        );
+        assert_eq!(
+            render("${n?json}", &vars(&[("n?", json!("3"))])).unwrap_err(),
+            RenderError::MissingPrompt("n?json".to_string())
+        );
     }
 
     #[test]

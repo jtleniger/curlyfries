@@ -77,6 +77,9 @@ Delimiter: `${name}`. Variable names match `[A-Za-z_][A-Za-z0-9_.-]*`
 | input | result |
 |---|---|
 | `${name}` | the value of `name` |
+| `${name[]}` | a pick over the array `name` (see [Picks](#picks)) |
+| `${name?}` | a text prompt labelled `name` (see [Prompt tokens](#prompt-tokens)) |
+| `${name?json}` | a JSON prompt labelled `name` (see [Prompt tokens](#prompt-tokens)) |
 | `$${` | the literal text `${` (the `{` is consumed by the escape) |
 | `$` not followed by `{` or `${` | a literal `$`, so `$5`, `$$`, `$$x` and `$$` pass through unchanged |
 | `$$${x}` | `$` followed by the literal text `${x}` |
@@ -88,6 +91,11 @@ whose chosen element is substituted when the request is sent (see
 [Picks](#picks)). The base name follows the same rule, so `${[]}` and `${a[]b}`
 are still `invalid variable name` failures.
 
+`${name?}` and `${name?json}` are *prompt* tokens rather than variables: the
+request is not sent until you type a value (see [Prompt tokens](#prompt-tokens)).
+The base name follows the same rule, so `${?}`, `${x ?}` and `${a?b}` are still
+`invalid variable name` failures.
+
 Parse failures are reported when a request file is loaded — the UI loads every
 request at startup:
 
@@ -95,7 +103,7 @@ request at startup:
 |---|---|
 | `${` with no later `}` | `error: unterminated `${` in <file>` |
 | `${}` or `${ }` | `error: empty variable name in <file>` |
-| `${1x}`, `${a b}`, `${a/b}`, `${[]}`, `${a[]b}` | `error: invalid variable name in <file>` |
+| `${1x}`, `${a b}`, `${a/b}`, `${[]}`, `${a[]b}`, `${?}`, `${x ?}`, `${a?b}` | `error: invalid variable name in <file>` |
 
 Each failure also prints the `at:` JSON pointer, the `value:` string and a
 `hint:`:
@@ -114,7 +122,9 @@ placeholder **is** the value, with its JSON type intact, and the surrounding
 whitespace is dropped. `"body": "${pirate}"` sends the `pirate` object, and
 `"limit": "${limit}"` with `limit = 2` sends the number `2` — the `/_debug/echo`
 example request in `examples/pirate` relies on exactly this. A whole `${name[]}`
-pick behaves the same way, sending the chosen element with its own type.
+pick behaves the same way, sending the chosen element with its own type, and a
+whole `${name?json}` prompt sends the entered value with its parsed type while a
+plain `${name?}` sends the entered text as a string.
 
 Slots that can only hold text — `path`, `name`, header names, header values,
 query names, query values and object keys inside `body` — always use the
@@ -243,6 +253,41 @@ A pick that cannot be offered fails before anything is sent:
 
 Outside the terminal UI nothing can fill a pick slot, so a request that reaches
 one fails with `error: no value chosen for `name[]` in <file>` (exit `3`).
+
+## Prompt tokens
+
+A `${name?}` or `${name?json}` placeholder in a request is a *prompt* token: the
+request is not sent until you type a value for the label `name`. The resolved
+request pane keeps the placeholder — it shows `${limit?}`, not a value — and
+pressing `Enter` on that request opens a text modal titled `Input limit` (or
+`Input n (JSON)` for the JSON form). Type the value, press `Enter` to submit it
+and send the request, or press `Esc` to close the modal without sending.
+
+Typing rules differ by form, so the two requirements stay apart:
+
+| token | what is stored | example |
+|---|---|---|
+| `${name?}` | the typed text, always as a JSON **string**: it is never parsed or coerced | `"id": "${id?}"` typed `3` sends `"id": "3"` |
+| `${name?json}` | the typed text **parsed as JSON**, so a number, boolean, `null`, array or object is expressible | `"crewCapacity": "${n?json}"` typed `3` sends `"crewCapacity": 3` |
+
+A JSON prompt refuses input that is not valid JSON: the modal stays open and
+shows `not valid JSON: <reason>`. Empty input is allowed for a text prompt (it
+stores `""`) but refused for a JSON prompt, since `""` is not valid JSON.
+
+The entered value is substituted into the request that is actually sent, with
+the same typing as any other placeholder: a whole `${name?json}` sends the
+parsed value with its JSON type intact, and inside a longer string either form
+uses the [string form](#whole-placeholders-and-string-form). Prompts are looked
+up under the key `name?` (text) or `name?json` (JSON), ahead of the session store
+and the environment, so a prompt never shadows a variable of the same name. Both
+forms may name the same label in one request; they are distinct keys and both are
+prompted.
+
+Every `Enter` prompts again: entered values are not remembered in the session
+file.
+
+Outside the terminal UI nothing can fill a prompt slot, so a request that reaches
+one fails with `error: no value entered for `limit?` in <file>` (exit `3`).
 
 ## Toggling headers and query parameters
 

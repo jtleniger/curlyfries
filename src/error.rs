@@ -162,6 +162,18 @@ pub enum Error {
         /// Base name of the array variable.
         name: String,
     },
+    /// A prompt slot was rendered without an entered value.
+    #[error("error: no value entered for `{token}` in {path}\n  at:    {pointer}\n  value: {value}\n  hint:  run this request from the terminal UI to enter a value", path = path.display(), value = json_string(value))]
+    UnresolvedPrompt {
+        /// File holding the template.
+        path: PathBuf,
+        /// JSON pointer of the offending string.
+        pointer: String,
+        /// The raw string as written in the file.
+        value: String,
+        /// The token as written, e.g. `limit?` or `n?json`.
+        token: String,
+    },
     /// An `outputs` expression could not be evaluated.
     #[error("error: output `{key}` failed in {path}\n  expression: {expression}\n  reason: {reason}", path = path.display())]
     Output {
@@ -267,6 +279,7 @@ impl Error {
             | Error::Template { .. }
             | Error::UndefinedVariable { .. }
             | Error::UnresolvedPick { .. }
+            | Error::UnresolvedPrompt { .. }
             | Error::Output { .. }
             | Error::MissingBaseUrl { .. }
             | Error::UnknownRequest { .. } => 3,
@@ -347,6 +360,17 @@ impl Error {
                 pointer,
                 value,
                 name,
+            },
+            Error::UnresolvedPrompt {
+                path,
+                pointer,
+                value,
+                token,
+            } => Error::UnresolvedPrompt {
+                path: short(path),
+                pointer,
+                value,
+                token,
             },
             Error::Output {
                 path,
@@ -491,6 +515,37 @@ mod tests {
         match relativized {
             Error::UnresolvedPick { path, .. } => {
                 assert_eq!(path, PathBuf::from("ships/by-class.json"));
+            }
+            other => panic!("wrong error: {other}"),
+        }
+    }
+
+    #[test]
+    fn unresolved_prompt_renders_with_a_hint() {
+        let err = Error::UnresolvedPrompt {
+            path: PathBuf::from("requests/ships/list.json"),
+            pointer: "/query/limit".to_string(),
+            value: "${limit?}".to_string(),
+            token: "limit?".to_string(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.starts_with("error: no value entered for `limit?` in requests/ships/list.json"),
+            "{text}"
+        );
+        assert!(text.contains("at:    /query/limit"), "{text}");
+        assert!(text.contains("value: \"${limit?}\""), "{text}");
+        assert!(
+            text.contains("hint:  run this request from the terminal UI"),
+            "{text}"
+        );
+        assert_eq!(err.exit_code(), 3);
+
+        // Relativize shortens the path the same way the other errors do.
+        let relativized = err.relativize(std::path::Path::new("requests"));
+        match relativized {
+            Error::UnresolvedPrompt { path, .. } => {
+                assert_eq!(path, PathBuf::from("ships/list.json"));
             }
             other => panic!("wrong error: {other}"),
         }

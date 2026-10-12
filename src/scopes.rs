@@ -17,7 +17,8 @@ pub struct Scopes<'a> {
     pub env: &'a Variables,
     /// Variables captured in this scope (this invocation sees its own writes).
     pub session: &'a Variables,
-    /// Chosen `${name[]}` values, keyed `name[]`.
+    /// Chosen `${name[]}` values keyed `name[]`, entered text keyed `name?`,
+    /// and entered JSON keyed `name?json`.
     pub picks: Option<&'a Variables>,
 }
 
@@ -52,12 +53,19 @@ impl<'a> Scopes<'a> {
     /// secret value with [`SECRET_MASK`], for anything the UI echoes.
     ///
     /// A `${name[]}` pick token renders as itself: the resolved view keeps the
-    /// placeholder so the UI can offer the picker.
+    /// placeholder so the UI can offer the picker. The `${name?}` and
+    /// `${name?json}` prompt tokens render as themselves for the same reason.
     pub fn display_lookup_fn(&self) -> impl Fn(&str) -> Option<Value> + '_ {
         let this = self;
         move |name: &str| {
             if let Some(base) = name.strip_suffix("[]") {
                 return Some(Value::String(format!("${{{base}[]}}")));
+            }
+            if let Some(base) = name.strip_suffix("?json") {
+                return Some(Value::String(format!("${{{base}?json}}")));
+            }
+            if let Some(base) = name.strip_suffix('?') {
+                return Some(Value::String(format!("${{{base}?}}")));
             }
             match this.lookup(name) {
                 Some(_) if this.is_secret(name) => Some(Value::String(SECRET_MASK.to_string())),
@@ -228,6 +236,9 @@ mod tests {
         let display = scopes.display_lookup_fn();
         // The resolved view keeps the placeholder even though a pick is supplied.
         assert_eq!(display("types[]"), Some(json!("${types[]}")));
+        // Prompt tokens are kept literal too.
+        assert_eq!(display("limit?"), Some(json!("${limit?}")));
+        assert_eq!(display("n?json"), Some(json!("${n?json}")));
         // The real lookup resolves the chosen element instead.
         assert_eq!(scopes.lookup_fn()("types[]"), Some(json!("sloop")));
     }

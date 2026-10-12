@@ -20,7 +20,8 @@ pub struct Runner<'a> {
     pub env_name: Option<String>,
     /// Variables from the selected environment.
     pub env: Variables,
-    /// Chosen `${name[]}` values, keyed `name[]`.
+    /// Chosen `${name[]}` values keyed `name[]`, entered text keyed `name?`,
+    /// and entered JSON keyed `name?json`.
     pub picks: Variables,
     /// Header and query slots switched off for this run.
     pub disabled: request::DisabledSlots,
