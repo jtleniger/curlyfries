@@ -376,7 +376,7 @@ pub fn runner<'a>(
         picks: curlyfries::variables::Variables::default(),
         disabled: curlyfries::request::DisabledSlots::default(),
         session,
-        client: curlyfries::execute::client(timeout),
+        client: curlyfries::execute::client(timeout, false),
         timeout,
         follow_redirects: false,
         warnings: Vec::new(),

@@ -43,7 +43,7 @@ fn send(
     };
     let resolved = execute::render_request(def, &scopes)?;
     execute::execute(
-        &execute::client(timeout),
+        &execute::client(timeout, false),
         &resolved,
         timeout,
         follow_redirects,
@@ -394,7 +394,7 @@ fn captures_cover_nested_paths_status_and_headers() {
         picks: None,
     };
     let resolved = execute::render_request(&request, &scopes).unwrap();
-    let result = execute::execute(&execute::client(None), &resolved, None, false).unwrap();
+    let result = execute::execute(&execute::client(None, false), &resolved, None, false).unwrap();
     let captured = execute::capture(&request.outputs, &result, &request.file).unwrap();
     assert_eq!(
         captured.get("firstPirateName"),
@@ -435,7 +435,7 @@ fn array_captures_map_over_a_response_array() {
         picks: None,
     };
     let resolved = execute::render_request(&request, &scopes).unwrap();
-    let result = execute::execute(&execute::client(None), &resolved, None, false).unwrap();
+    let result = execute::execute(&execute::client(None, false), &resolved, None, false).unwrap();
     let captured = execute::capture(&request.outputs, &result, &request.file).unwrap();
     assert_eq!(captured.get("ids"), Some(&json!([1, 2])));
     assert_eq!(
@@ -472,7 +472,7 @@ fn mapping_over_a_non_array_fails_the_capture() {
         picks: None,
     };
     let resolved = execute::render_request(&request, &scopes).unwrap();
-    let result = execute::execute(&execute::client(None), &resolved, None, false).unwrap();
+    let result = execute::execute(&execute::client(None, false), &resolved, None, false).unwrap();
     let error = execute::capture(&request.outputs, &result, &request.file).unwrap_err();
     match &error {
         Error::Output { reason, .. } => {
@@ -514,7 +514,7 @@ fn failed_captures_store_nothing() {
         picks: None,
     };
     let resolved = execute::render_request(&request, &scopes).unwrap();
-    let result = execute::execute(&execute::client(None), &resolved, None, false).unwrap();
+    let result = execute::execute(&execute::client(None, false), &resolved, None, false).unwrap();
     let error = execute::capture(&request.outputs, &result, &request.file).unwrap_err();
     assert!(matches!(error, Error::Output { .. }), "{error}");
     // The caller's map is untouched: nothing was captured.

@@ -24,13 +24,14 @@ pub const DEFAULT_ENVIRONMENTS_DIR: &str = "environments";
 /// Per-request timeout in seconds when the manifest does not say otherwise.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// Manifest keys, in the order they are listed in errors.
-pub const MANIFEST_KEYS: [&str; 6] = [
+pub const MANIFEST_KEYS: [&str; 7] = [
     "requestsDir",
     "environmentsDir",
     "defaultEnvironment",
     "followRedirects",
     "followSymlinks",
     "timeout",
+    "useSystemTrustStore",
 ];
 
 /// Parsed `curlyfries.json`.
@@ -48,6 +49,8 @@ pub struct Manifest {
     pub follow_symlinks: bool,
     /// Per-request timeout in seconds; `0` disables timeouts.
     pub timeout_secs: u64,
+    /// Verify `https` certificates against the operating system trust store.
+    pub use_system_trust_store: bool,
 }
 
 impl Default for Manifest {
@@ -59,6 +62,7 @@ impl Default for Manifest {
             follow_redirects: false,
             follow_symlinks: false,
             timeout_secs: DEFAULT_TIMEOUT_SECS,
+            use_system_trust_store: false,
         }
     }
 }
@@ -206,6 +210,7 @@ pub fn load_manifest(path: &Path) -> Result<Manifest, Error> {
     for (key, slot) in [
         ("followRedirects", &mut manifest.follow_redirects),
         ("followSymlinks", &mut manifest.follow_symlinks),
+        ("useSystemTrustStore", &mut manifest.use_system_trust_store),
     ] {
         if let Some(value) = map.get(key) {
             match value.as_bool() {
@@ -518,14 +523,16 @@ mod tests {
     fn manifest_flags_parse_and_default_to_false() {
         assert!(!Manifest::default().follow_redirects);
         assert!(!Manifest::default().follow_symlinks);
+        assert!(!Manifest::default().use_system_trust_store);
 
         let dir = project_with(&[(
             MANIFEST_FILE,
-            r#"{ "followRedirects": true, "followSymlinks": true }"#,
+            r#"{ "followRedirects": true, "followSymlinks": true, "useSystemTrustStore": true }"#,
         )]);
         let manifest = load_manifest(&dir.child(MANIFEST_FILE)).unwrap();
         assert!(manifest.follow_redirects);
         assert!(manifest.follow_symlinks);
+        assert!(manifest.use_system_trust_store);
 
         let bad = project_with(&[(MANIFEST_FILE, r#"{ "followRedirects": "yes" }"#)]);
         let err = load_manifest(&bad.child(MANIFEST_FILE)).unwrap_err();
@@ -534,6 +541,18 @@ mod tests {
                 pointer, message, ..
             } => {
                 assert_eq!(pointer, "/followRedirects");
+                assert!(message.contains("must be a boolean"), "{message}");
+            }
+            other => panic!("wrong error: {other}"),
+        }
+
+        let bad = project_with(&[(MANIFEST_FILE, r#"{ "useSystemTrustStore": 1 }"#)]);
+        let err = load_manifest(&bad.child(MANIFEST_FILE)).unwrap_err();
+        match err {
+            Error::Schema {
+                pointer, message, ..
+            } => {
+                assert_eq!(pointer, "/useSystemTrustStore");
                 assert!(message.contains("must be a boolean"), "{message}");
             }
             other => panic!("wrong error: {other}"),

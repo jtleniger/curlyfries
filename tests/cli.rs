@@ -437,9 +437,13 @@ fn import_writes_a_runnable_project() {
     let resolved =
         curlyfries::execute::render_request(&definition, &scopes).expect("health request renders");
     assert_eq!(resolved.url, format!("{}/health", server.base_url));
-    let result =
-        curlyfries::execute::execute(&curlyfries::execute::client(None), &resolved, None, false)
-            .expect("health request executes");
+    let result = curlyfries::execute::execute(
+        &curlyfries::execute::client(None, false),
+        &resolved,
+        None,
+        false,
+    )
+    .expect("health request executes");
     assert_eq!(result.status, 200);
     let received = server.finish();
     assert_eq!(received.len(), 1);
@@ -542,9 +546,13 @@ paths:
     };
     let resolved =
         curlyfries::execute::render_request(&definition, &scopes).expect("ping request renders");
-    let result =
-        curlyfries::execute::execute(&curlyfries::execute::client(None), &resolved, None, false)
-            .expect("ping request executes");
+    let result = curlyfries::execute::execute(
+        &curlyfries::execute::client(None, false),
+        &resolved,
+        None,
+        false,
+    )
+    .expect("ping request executes");
     assert_eq!(result.status, 200);
     assert_eq!(server.finish()[0].target, "/api/ping?verbose=true");
 }

@@ -15,7 +15,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml_ng = "0.10"
 thiserror = "2"
-ureq = "3"
+ureq = { version = "3", features = ["platform-verifier"] }
 
 # The profile that 'dist' will build with
 [profile.dist]

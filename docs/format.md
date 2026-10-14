@@ -17,6 +17,7 @@ listed here:
 | `followRedirects` | boolean | `false` | follow same-origin `3xx` redirects |
 | `followSymlinks` | boolean | `false` | follow symlinks in the request and environment directories |
 | `timeout` | number | `30` | per-request timeout in seconds; `0` disables timeouts |
+| `useSystemTrustStore` | boolean | `false` | verify `https` certificates against the operating system trust store instead of the bundled roots |
 
 Unknown keys, wrong types and non-object documents are errors
 (`error: invalid request file <path>` / `at: <pointer>` / `reason: …`).
