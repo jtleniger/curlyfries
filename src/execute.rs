@@ -60,13 +60,24 @@ pub struct ExecResult {
 
 /// Builds the HTTP agent. `None` means no timeouts at all.
 ///
+/// `use_system_trust_store` verifies `https` certificates against the operating
+/// system trust store instead of the bundled webpki roots; it has no effect on
+/// plain `http`.
+///
 /// Redirects are never followed by the agent itself; [`execute`] is the only
 /// place that decides whether to follow one.
-pub fn client(timeout: Option<Duration>) -> ureq::Agent {
+pub fn client(timeout: Option<Duration>, use_system_trust_store: bool) -> ureq::Agent {
     let mut builder = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .max_redirects(0)
         .user_agent(format!("curlyfries/{}", env!("CARGO_PKG_VERSION")));
+    if use_system_trust_store {
+        builder = builder.tls_config(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                .build(),
+        );
+    }
     if let Some(duration) = timeout {
         builder = builder
             .timeout_global(Some(duration))
@@ -1258,7 +1269,9 @@ mod tests {
 
     #[test]
     fn client_is_buildable_with_and_without_a_timeout() {
-        let _ = client(None);
-        let _ = client(Some(Duration::from_secs(1)));
+        let _ = client(None, false);
+        let _ = client(Some(Duration::from_secs(1)), false);
+        // The platform-verifier path must construct without panicking.
+        let _ = client(Some(Duration::from_secs(1)), true);
     }
 }

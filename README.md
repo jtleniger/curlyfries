@@ -171,7 +171,7 @@ the only things it prints without one. Environments, the per-request timeout and
 the capture store are configured in files (see
 [`docs/format.md`](docs/format.md)) and driven from inside the UI.
 
-## Redirects, symlinks and the timeout
+## Redirects, symlinks, TLS roots and the timeout
 
 Redirects and symlinks are off by default, so neither a hostile server nor a
 hostile checkout can steer the client on its own. Set them in `curlyfries.json`:
@@ -196,6 +196,16 @@ hostile checkout can steer the client on its own. Set them in `curlyfries.json`:
   `error: request timed out after <n>s`.
 - Plain http keeps working either way: the policy compares scheme, host and
   port rather than requiring TLS.
+- `useSystemTrustStore` (default `false`) verifies `https` certificates against
+  the operating system trust store — the CAs your browser and `curl` trust —
+  instead of the roots bundled with the binary. Set it when an internal or
+  locally-provisioned CA is installed system-wide; a private CA that is not in
+  the bundle otherwise fails with `error: connection error in <url>`. It only
+  affects `https`; plain `http` is unchanged either way.
+
+```json
+{ "useSystemTrustStore": true }
+```
 
 ## Exit codes
 

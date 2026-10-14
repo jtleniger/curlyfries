@@ -1163,7 +1163,7 @@ impl App {
                 picks,
                 disabled,
                 session: &mut session,
-                client: execute::client(timeout),
+                client: execute::client(timeout, project.manifest.use_system_trust_store),
                 timeout,
                 follow_redirects: project.manifest.follow_redirects,
                 warnings: Vec::new(),
